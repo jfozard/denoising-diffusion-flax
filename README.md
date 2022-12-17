@@ -1,5 +1,5 @@
 
-# Denoising Diffusion Probabilistic Model in Flax 
+# Denoising Diffusion Probabilistic Model in Flax  - originally from https://github.com/yiyixuxu/denoising-diffusion-flax
 
 This implementation is based on [lucidrains](https://github.com/lucidrains)'s [denoising-diffusion-pytorch](https://github.com/lucidrains/denoising-diffusion-pytorch), where he implemented the original DDPM model proposed from paper [Denoising Diffusion Probabilistic Models](https://arxiv.org/abs/2006.11239), as well as latest research findings
 

@@ -282,7 +282,7 @@ class Unet(nn.Module):
     learned_variance: bool = False
     dtype: Any = jnp.float32
     simple: bool = False
-
+    full_attn_at_top: bool=False
 
     @nn.compact
     def __call__(self, x, time):
@@ -326,9 +326,9 @@ class Unet(nn.Module):
         # middle
         h =  ResnetBlock(dim= mid_dim, groups= self.resnet_block_groups, dtype=self.dtype, name = 'mid.resblock_0')(h, time_emb)
         if not self.simple:
-            h = AttnBlock(use_linear_attention=False, dtype=self.dtype, name = 'mid.attenblock_0')(h)
+            h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_0')(h)
         else:
-            h = AttnBlock(use_linear_attention=True, dtype=self.dtype, name = 'mid.attenblock_0')(h)
+            h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_0')(h)
         
         h = ResnetBlock(dim= mid_dim, groups= self.resnet_block_groups, dtype=self.dtype, name = 'mid.resblock_1')(h, time_emb)
 

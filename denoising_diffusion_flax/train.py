@@ -58,6 +58,17 @@ def crop_resize(image, resolution):
       method=tf.image.ResizeMethod.BICUBIC)
   return tf.cast(image, tf.uint8)
 
+def crop_random(image, resolution):
+  s = tf.random.uniform((1,), int(0.7*resolution), resolution+1)[0]
+  image = tf.image.random_crop(image, (s, s))
+  image = tf.image.resize(
+      image,
+      size=(resolution, resolution),
+      antialias=True,
+      method=tf.image.ResizeMethod.BICUBIC)
+  return tf.cast(image, tf.uint8)
+                               
+  
 
 def get_dataset(rng, config):
     
@@ -79,7 +90,7 @@ def get_dataset(rng, config):
 
     def preprocess_fn(d):
         img = d['image']
-        img = crop_resize(img, config.data.image_size)
+        img = crop_random(img, config.data.image_size)
         img = tf.image.flip_left_right(img)
         img= tf.image.convert_image_dtype(img, input_dtype)
         return({'image':img})

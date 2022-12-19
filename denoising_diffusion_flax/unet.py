@@ -281,6 +281,7 @@ class Unet(nn.Module):
     resnet_block_groups: int = 8
     learned_variance: bool = False
     dtype: Any = jnp.float32
+    simple: bool = False
 
 
     @nn.compact
@@ -311,7 +312,8 @@ class Unet(nn.Module):
           hs.append(h)
 
           h = ResnetBlock(dim=dim_in, groups=self.resnet_block_groups, dtype=self.dtype, name=f'down_{ind}.resblock_1')(h, time_emb)
-          h = AttnBlock(dtype=self.dtype, name=f'down_{ind}.attnblock_0')(h)
+          if not self.simple:
+            h = AttnBlock(dtype=self.dtype, name=f'down_{ind}.attnblock_0')(h)
           hs.append(h)
 
           if ind < num_resolutions -1:
@@ -323,7 +325,11 @@ class Unet(nn.Module):
 
         # middle
         h =  ResnetBlock(dim= mid_dim, groups= self.resnet_block_groups, dtype=self.dtype, name = 'mid.resblock_0')(h, time_emb)
-        h = AttnBlock(use_linear_attention=False, dtype=self.dtype, name = 'mid.attenblock_0')(h)
+        if not self.simple:
+            h = AttnBlock(use_linear_attention=False, dtype=self.dtype, name = 'mid.attenblock_0')(h)
+        else:
+            h = AttnBlock(use_linear_attention=True, dtype=self.dtype, name = 'mid.attenblock_0')(h)
+        
         h = ResnetBlock(dim= mid_dim, groups= self.resnet_block_groups, dtype=self.dtype, name = 'mid.resblock_1')(h, time_emb)
 
         # upsampling 
@@ -340,7 +346,8 @@ class Unet(nn.Module):
            h = jnp.concatenate([h, hs.pop()], axis=-1)
            assert h.shape[-1] == dim_in + dim_out
            h = ResnetBlock(dim=dim_in, groups=self.resnet_block_groups, dtype=self.dtype, name=f'up_{ind}.resblock_1')(h, time_emb)
-           h = AttnBlock(dtype=self.dtype, name=f'up_{ind}.attnblock_0')(h)
+           if not self.simple:
+               h = AttnBlock(dtype=self.dtype, name=f'up_{ind}.attnblock_0')(h)
 
            assert h.shape[-1] == dim_in
            if ind > 0:

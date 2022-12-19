@@ -60,7 +60,7 @@ def crop_resize(image, resolution):
 
 def crop_random(image, resolution):
   s = tf.random.uniform((1,), int(0.7*resolution), resolution+1)[0]
-  image = tf.image.random_crop(image, (s, s))
+  image = tf.image.random_crop(image, (s, s, 1))
   image = tf.image.resize(
       image,
       size=(resolution, resolution),

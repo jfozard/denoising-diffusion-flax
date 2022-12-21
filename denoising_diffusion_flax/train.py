@@ -158,7 +158,7 @@ def get_dataset(rng, config):
            # Use _numpy() for zero-copy conversion between TF and NumPy.
            x = x._numpy()  # pylint: disable=protected-access
            # normalize to [-1,1]
-           x = decimal_to_bits(x)
+           x = decimal_to_bits(x)*config.model.bit_scale
            #x = normalize_to_neg_one_to_one(x)
           # reshape (batch_size, height, width, channels) to
          # (local_devices, device_batch_size, height, width, 3)
@@ -519,7 +519,7 @@ def train(config: ml_collections.ConfigDict,
           samples = []
           for i in trange(0, config.training.num_sample, config.data.batch_size):
               rng, sample_rng = jax.random.split(rng)
-              samples.append(bits_to_decimal(sample_loop(sample_rng, state, bit_shape, p_sample_step, config.ddpm.timesteps)))
+              samples.append(bits_to_decimal(sample_loop(sample_rng, state, bit_shape, p_sample_step, config.ddpm.timesteps, config.model.bit_scale))
           samples = jnp.concatenate(samples) # num_devices, batch, H, W, C
           
           this_sample_dir = os.path.join(sample_dir, f"iter_{step}_host_{jax.process_index()}")

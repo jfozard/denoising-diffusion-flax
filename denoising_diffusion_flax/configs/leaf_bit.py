@@ -59,8 +59,10 @@ def get_config():
   config.model = model = ml_collections.ConfigDict()
   model.dim = 64
   model.dim_mults = (1, 2, 4, 8)
-  model.simple = True
-
+  model.simple = False
+  model.bit_scale = 0.1
+  model.full_attn_at_top = True
+  
   # optim
   config.optim = optim = ml_collections.ConfigDict()
   optim.optimizer = 'Adam'

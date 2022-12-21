@@ -46,6 +46,34 @@ def l1_loss(logit, target):
 def normalize_to_neg_one_to_one(img):
     return img * 2 - 1
 
+def decimal_to_bits(x, bits = 8):
+    """ expects image tensor ranging from 0 to 1, outputs bit tensor ranging from -1 to 1 """
+
+    x = np.clip((x * 255 + 0.5).astype(np.int16), 0, 255)
+    print('dtb', x)
+    
+    mask = 2 ** np.arange(bits - 1, -1, -1)
+    mask = rearrange(mask, 'd -> d 1 1')
+    x = rearrange(x, 'b c h w -> b c 1 h w')
+
+    bits = ((x & mask) != 0).astype(np.float32)
+    bits = rearrange(bits, 'b c d h w -> b (c d) h w')
+    bits = bits * 2 - 1
+    return bits
+
+def bits_to_decimal(x, bits = 8):
+    """ expects bits from -1 to 1, outputs image tensor from 0 to 1 """
+
+    x = (x > 0).astype(np.int16)
+    print('btd', x)
+    mask = 2 ** np.arange(bits - 1, -1, -1)
+
+    mask = rearrange(mask, 'd -> d 1 1')
+    x = rearrange(x, 'b (c d) h w -> b c d h w', d = 8)
+    dec = reduce(x * mask, 'b c d h w -> b c h w', 'sum')
+    return np.clip((dec)/ 255, 0., 1.)
+
+  
 def crop_resize(image, resolution):
   crop = tf.minimum(tf.shape(image)[0], tf.shape(image)[1])
   h, w = tf.shape(image)[0], tf.shape(image)[1]
@@ -68,7 +96,14 @@ def crop_random(image, resolution):
       method=tf.image.ResizeMethod.BICUBIC)
   return tf.cast(image, tf.uint8)
                                
-  
+
+def convert_labels(image, resolution):
+    s = resolution
+    a = tf.image.random_crop(image, (s, s, 1))
+    u, aa = jnp.unique(a._numpy(), return_inverse=True)
+    b = jnp.array(sample(jnp.range(256)/255.0, len(u)))
+    r = b[aa].reshape(a.shape) 
+    return r 
 
 def get_dataset(rng, config):
     
@@ -89,8 +124,8 @@ def get_dataset(rng, config):
     dataset_builder.download_and_prepare()
 
     def preprocess_fn(d):
-        img = d['image']
-        img = crop_random(img, config.data.image_size)
+        img = d['labels']
+        img = convert_labels(img, config.data.image_size)
         img = tf.image.flip_left_right(img)
         img= tf.image.convert_image_dtype(img, input_dtype)
         return({'image':img})
@@ -123,7 +158,8 @@ def get_dataset(rng, config):
            # Use _numpy() for zero-copy conversion between TF and NumPy.
            x = x._numpy()  # pylint: disable=protected-access
            # normalize to [-1,1]
-           x = normalize_to_neg_one_to_one(x)
+           x = decimal_to_bits(x)
+           #x = normalize_to_neg_one_to_one(x)
           # reshape (batch_size, height, width, channels) to
          # (local_devices, device_batch_size, height, width, 3)
            return x.reshape((local_device_count, -1) + x.shape[1:])
@@ -475,13 +511,15 @@ def train(config: ml_collections.ConfigDict,
                   })
       
       # Save a checkpoint periodically and generate samples.
+      bit_shape = tuple(batch['image'].shape)
+      
       if (step + 1) % config.training.save_and_sample_every == 0 or step + 1 == num_steps:
           # generate and save sampling 
           logging.info(f'generating samples....')
           samples = []
           for i in trange(0, config.training.num_sample, config.data.batch_size):
               rng, sample_rng = jax.random.split(rng)
-              samples.append(sample_loop(sample_rng, state, tuple(batch['image'].shape), p_sample_step, config.ddpm.timesteps))
+              samples.append(bits_to_decimal(sample_loop(sample_rng, state, bit_shape, p_sample_step, config.ddpm.timesteps)))
           samples = jnp.concatenate(samples) # num_devices, batch, H, W, C
           
           this_sample_dir = os.path.join(sample_dir, f"iter_{step}_host_{jax.process_index()}")

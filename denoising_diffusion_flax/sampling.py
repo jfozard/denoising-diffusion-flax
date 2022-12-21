@@ -97,7 +97,7 @@ def sample_loop(rng, state, shape, p_sample_step, timesteps):
         x, x0 = p_sample_step(state, step_rng, x, jax_utils.replicate(t), x0)
         list_x0.append(x0)
     # normalize to [0,1]
-    img = unnormalize_to_zero_to_one(jnp.asarray(x0))
-
+    #img = unnormalize_to_zero_to_one(jnp.asarray(x0))
+    
     return img
 

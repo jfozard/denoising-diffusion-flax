@@ -1,16 +1,19 @@
 """Main file for running denoising-diffusion-flax.
 """
+
+import scipy.optimize
+
 from absl import app
 from absl import flags
 from absl import logging
 from clu import platform
 import jax
 from ml_collections import config_flags
-import tensorflow as tf
 
 
 import train, sampling
 
+import tensorflow as tf
 
 FLAGS = flags.FLAGS
 

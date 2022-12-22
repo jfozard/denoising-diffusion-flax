@@ -196,6 +196,7 @@ def initialized(key, image_size,image_channel, model):
   @jax.jit
   def init(*args):
     return model.init(*args)
+
   variables = init(
       {'params': key}, 
       jnp.ones(input_shape, model.dtype), # x noisy image
@@ -333,8 +334,8 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
     # create batched timesteps: t with shape (B,)
     B, H, W, C = x.shape
     rng, t_rng = jax.random.split(rng)
-#    batched_t = jax.random.randint(t_rng, shape=(B,), dtype = jnp.int32, minval=0, maxval= len(ddpm_params['betas']))
-    batched_t = jax.random.uniform(t_rng, shape=(B,), minval=0, maxval=0.9999)
+    batched_t = jax.random.randint(t_rng, shape=(B,), dtype = jnp.int32, minval=0, maxval= len(ddpm_params['betas']))
+#    batched_t = jax.random.uniform(t_rng, shape=(B,), minval=0, maxval=0.9999)
      
   
     # sample a noise (input for q_sample)
@@ -343,15 +344,16 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
     # if is_pred_x0 == True, the target for loss calculation is x, else noise
     target = x if is_pred_x0 else noise
  
-    noise_level = alpha_cosine_log_snr(batched_t)
+    #noise_level = alpha_cosine_log_snr(batched_t)
 
-    padded_noise_level = right_pad_dims_to(x, noise_level)
+    #padded_noise_level = right_pad_dims_to(x, noise_level)
 
-    alpha, sigma = log_snr_to_alpha_sigma(padded_noise_level)
+    #alpha, sigma = log_snr_to_alpha_sigma(padded_noise_level)
 
     # generate the noisy image (input for denoise model)
-    x_t = alpha * x + sigma * noise 
-    #x_t = q_sample(x, batched_t, noise, ddpm_params)
+    #x_t = alpha * x + sigma * noise
+    #print('x_t:', x_t.abs().mean())
+    x_t = q_sample(x, batched_t, noise, ddpm_params)
     
     # if doing self-conditioning, 50% of the time first estimate x_0 = f(x_t, 0, t) and then use the estimated x_0 for Self-Conditioning
     # we don't backpropagate through the estimated x_0 (exclude from the loss calculation)
@@ -363,7 +365,8 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
 
         # self-conditioning 
         def estimate_x0(_):
-            x0, _ = model_predict2(state, x_t, zeros, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=False)
+            x0, _ = model_predict(state, x_t, zeros, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=False)
+#            x0, _ = model_predict2(state, x_t, zeros, noise_level, ddpm_params, self_condition, is_pred_x0, use_ema=False)
             return x0
 
         x0 = jax.lax.cond(
@@ -399,9 +402,17 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
     loss = jax.lax.pmean(loss, axis_name=pmap_axis)
     loss_ema = jax.lax.pmean(compute_loss(state.params_ema), axis_name=pmap_axis)
 
+#    pred = state.apply_fn({'params':state.params}, x_t, batched_t)
+          
+    
+    
     metrics = {'loss': loss,
-               'loss_ema': loss_ema}
-
+               'loss_ema': loss_ema,
+               'x_t': jnp.mean(jnp.abs(x_t)),
+ #              'pred': jnp.mean(jnp.abs(pred)),
+ #              'target':  jnp.mean(jnp.abs(target)) }
+               }
+    
     new_state = state.apply_gradients(grads=grads)
 
     if dynamic_scale:
@@ -523,6 +534,9 @@ def train(config: ml_collections.ConfigDict,
       train_step_rng = jnp.asarray(train_step_rng)
 
       state, metrics = p_train_step(train_step_rng, state, batch)
+
+#      print(metrics)
+      
       for h in hooks:
           h(step)
       if step == step_offset:

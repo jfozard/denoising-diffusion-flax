@@ -8,7 +8,7 @@ def get_config():
   # wandb
   config.wandb = wandb = ml_collections.ConfigDict()
   wandb.entity = None
-  wandb.project = "ddpm-bit"
+  wandb.project = "ddpm-bit-2"
   wandb.job_type = "training"
   wandb.name = None 
   wandb.log_train = True
@@ -22,7 +22,7 @@ def get_config():
   training.log_every_steps = 100
   training.loss_type = 'l2'
   training.half_precision = False
-  training.save_and_sample_every = 500
+  training.save_and_sample_every = 1000
   training.num_sample = 64
 
 
@@ -43,7 +43,7 @@ def get_config():
   ddpm.p2_loss_weight_gamma = 1. # p2 loss weight, from https://arxiv.org/abs/2204.00227 - 0 is equivalent to weight of 1 across time - 1. is recommended
   ddpm.p2_loss_weight_k = 1
   ddpm.self_condition = False # not tested yet
-  ddpm.pred_x0 = False # by default, the model will predict noise, if True predict x0
+  ddpm.pred_x0 = True # by default, the model will predict noise, if True predict x0
 
 
   # data

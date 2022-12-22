@@ -184,7 +184,7 @@ class ResnetBlock(nn.Module):
 class Attention(nn.Module):
     heads: int = 4
     dim_head: int = 32
-    scale: int = 10
+#    scale: int = 10
     dtype: Any = jnp.float32
 
     @nn.compact
@@ -198,12 +198,14 @@ class Attention(nn.Module):
         q, k, v = map(lambda t: rearrange(
             t, 'b x y (h d) -> b (x y) h d', h=self.heads), (q, k, v))
 
+        q = q * (self.dim_head ** -0.5)
+
         assert q.shape == k.shape == v.shape == (
             B, H * W, self.heads, self.dim_head)
 
-        q, k = map(l2norm, (q, k))
+        #q, k = map(l2norm, (q, k))
 
-        sim = jnp.einsum('b i h d, b j h d -> b h i j', q, k) * self.scale
+        sim = jnp.einsum('b i h d, b j h d -> b h i j', q, k) #* self.scale
         attn = nn.softmax(sim, axis=-1)
         assert attn.shape == (B, self.heads, H * W,  H * W)
 
@@ -211,7 +213,7 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h (x y) d -> b x y (h d)', x=H)
         assert out.shape == (B, H, W, dim)
 
-        out = nn.Conv(features=C, kernel_size=(1, 1), dtype=self.dtype, name='to_out.conv_0')(out)
+        out = nn.Conv(features=C, kernel_size=(1, 1), dtype=self.dtype, name='to_out.conv_0')(out) # This is extra
         return (out)
 
 

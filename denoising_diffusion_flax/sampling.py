@@ -64,8 +64,9 @@ def model_predict(state, x, x0, t, ddpm_params, self_condition, is_pred_x0, use_
     return x0_pred, noise_pred
 
 
-def ddpm_sample_step(state, rng, x, t, x0_last, ddpm_params, bit_scale, self_condition=False, is_pred_x0=False):
- 
+def ddpm_sample_step(state, rng, x, t, x0_last, bit_scale, ddpm_params, self_condition=False, is_pred_x0=False):
+
+    print(bit_scale, x.shape, x0_last.shape) 
     batched_t = jnp.ones((x.shape[0],), dtype=jnp.int32) * t
     
     if self_condition:
@@ -82,7 +83,7 @@ def ddpm_sample_step(state, rng, x, t, x0_last, ddpm_params, bit_scale, self_con
     return x, x0
 
 
-def sample_loop(rng, state, shape, p_sample_step, timesteps, bit_scale):
+def sample_loop(rng, state, shape, p_sample_step, timesteps):
     
     # shape include the device dimension: (device, per_device_batch_size, H,W,C)
     rng, x_rng = jax.random.split(rng)
@@ -94,10 +95,11 @@ def sample_loop(rng, state, shape, p_sample_step, timesteps, bit_scale):
     for t in reversed(jnp.arange(timesteps)):
         rng, *step_rng = jax.random.split(rng, num=jax.local_device_count() + 1)
         step_rng = jnp.asarray(step_rng)
-        x, x0 = p_sample_step(state, step_rng, x, jax_utils.replicate(t), x0, bit_scale)
+#        print(shape, x.shape, x0.shape)
+        x, x0 = p_sample_step(state, step_rng, x, jax_utils.replicate(t), x0)
         list_x0.append(x0)
     # normalize to [0,1]
     #img = unnormalize_to_zero_to_one(jnp.asarray(x0))
     
-    return img
+    return jnp.asarray(x0)
 

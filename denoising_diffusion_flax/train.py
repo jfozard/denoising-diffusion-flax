@@ -2,7 +2,9 @@ import functools
 import time
 import os
 
-from einops import repeat
+import math
+
+from einops import repeat, rearrange, reduce
 
 from absl import logging
 from clu import metric_writers
@@ -50,14 +52,14 @@ def decimal_to_bits(x, bits = 8):
     """ expects image tensor ranging from 0 to 1, outputs bit tensor ranging from -1 to 1 """
 
     x = np.clip((x * 255 + 0.5).astype(np.int16), 0, 255)
-    print('dtb', x)
+#    print('dtb', x)
     
     mask = 2 ** np.arange(bits - 1, -1, -1)
-    mask = rearrange(mask, 'd -> d 1 1')
-    x = rearrange(x, 'b c h w -> b c 1 h w')
+    mask = rearrange(mask, 'd -> 1 1 1 1 d')
+    x = rearrange(x, 'b h w c-> b h w c 1')
 
     bits = ((x & mask) != 0).astype(np.float32)
-    bits = rearrange(bits, 'b c d h w -> b (c d) h w')
+    bits = rearrange(bits, 'b h w c d  -> b h w (c d)')
     bits = bits * 2 - 1
     return bits
 
@@ -65,13 +67,14 @@ def bits_to_decimal(x, bits = 8):
     """ expects bits from -1 to 1, outputs image tensor from 0 to 1 """
 
     x = (x > 0).astype(np.int16)
-    print('btd', x)
+#    print('btd', x)
     mask = 2 ** np.arange(bits - 1, -1, -1)
 
-    mask = rearrange(mask, 'd -> d 1 1')
-    x = rearrange(x, 'b (c d) h w -> b c d h w', d = 8)
-    dec = reduce(x * mask, 'b c d h w -> b c h w', 'sum')
+    mask = rearrange(mask, 'd -> 1 1 1 1 d')
+    x = rearrange(x, 'b h w (c d) -> b h w c d', d = 8)
+    dec = reduce(x * mask, 'b h w c d -> b h w c', 'sum')
     return np.clip((dec)/ 255, 0., 1.)
+
 
   
 def crop_resize(image, resolution):
@@ -100,10 +103,10 @@ def crop_random(image, resolution):
 def convert_labels(image, resolution):
     s = resolution
     a = tf.image.random_crop(image, (s, s, 1))
-    u, aa = jnp.unique(a._numpy(), return_inverse=True)
-    b = jnp.array(sample(jnp.range(256)/255.0, len(u)))
-    r = b[aa].reshape(a.shape) 
-    return r 
+#    u, aa = jnp.unique(a._numpy(), return_inverse=True)
+#    b = jnp.array(sample(jnp.range(256)/255.0, len(u)))
+#    r = b[aa].reshape(a.shape) 
+    return tf.cast(a, tf.uint8)
 
 def get_dataset(rng, config):
     
@@ -124,7 +127,7 @@ def get_dataset(rng, config):
     dataset_builder.download_and_prepare()
 
     def preprocess_fn(d):
-        img = d['labels']
+        img = d['mask']
         img = convert_labels(img, config.data.image_size)
         img = tf.image.flip_left_right(img)
         img= tf.image.convert_image_dtype(img, input_dtype)
@@ -188,6 +191,8 @@ def initialized(key, image_size,image_channel, model):
 
   input_shape = (1, image_size, image_size, image_channel)
 
+  print('init shape', input_shape)
+  
   @jax.jit
   def init(*args):
     return model.init(*args)
@@ -285,6 +290,38 @@ def q_sample(x, t, noise, ddpm_params):
 
     return x_t
 
+def log(t, eps = 1e-20):
+    return jnp.log(jnp.maximum(t, eps))
+
+
+
+def right_pad_dims_to(x, t):
+    padding_dims = x.ndim - t.ndim
+    if padding_dims <= 0:
+        return t
+    return t.reshape(*t.shape, *((1,) * padding_dims))
+
+def beta_linear_log_snr(t):
+    return -jnp.log(jnp.expm1(1e-4 + 10 * (t ** 2)))
+
+def alpha_cosine_log_snr(t, s: float = 0.008):
+    return -log((jnp.cos((t + s) / (1 + s) * math.pi * 0.5) ** -2) - 1, eps = 1e-5) # not sure if this accounts for beta being clipped to 0.999 in discrete version
+
+def log_snr_to_alpha_sigma(log_snr):
+    return jnp.sqrt(jax.nn.sigmoid(log_snr)), jnp.sqrt(jax.nn.sigmoid(-log_snr))
+
+def model_predict2(state, x, x0, t, ddpm_params, self_condition, is_pred_x0, use_ema=True):
+    if use_ema:
+        variables = {'params': state.params_ema}
+    else:
+        variables = {'params': state.params}
+    
+    if self_condition:
+        pred = state.apply_fn(variables, jnp.concatenate([x, x0],axis=-1), t)
+    else:
+        pred = state.apply_fn(variables, x, t)
+    
+    return pred, None
 
 # train step
 def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pred_x0=False, pmap_axis='batch'):
@@ -296,16 +333,25 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
     # create batched timesteps: t with shape (B,)
     B, H, W, C = x.shape
     rng, t_rng = jax.random.split(rng)
-    batched_t = jax.random.randint(t_rng, shape=(B,), dtype = jnp.int32, minval=0, maxval= len(ddpm_params['betas']))
-   
+#    batched_t = jax.random.randint(t_rng, shape=(B,), dtype = jnp.int32, minval=0, maxval= len(ddpm_params['betas']))
+    batched_t = jax.random.uniform(t_rng, shape=(B,), minval=0, maxval=0.9999)
+     
+  
     # sample a noise (input for q_sample)
     rng, noise_rng = jax.random.split(rng)
     noise = jax.random.normal(noise_rng, x.shape)
     # if is_pred_x0 == True, the target for loss calculation is x, else noise
     target = x if is_pred_x0 else noise
+ 
+    noise_level = alpha_cosine_log_snr(batched_t)
+
+    padded_noise_level = right_pad_dims_to(x, noise_level)
+
+    alpha, sigma = log_snr_to_alpha_sigma(padded_noise_level)
 
     # generate the noisy image (input for denoise model)
-    x_t = q_sample(x, batched_t, noise, ddpm_params)
+    x_t = alpha * x + sigma * noise 
+    #x_t = q_sample(x, batched_t, noise, ddpm_params)
     
     # if doing self-conditioning, 50% of the time first estimate x_0 = f(x_t, 0, t) and then use the estimated x_0 for Self-Conditioning
     # we don't backpropagate through the estimated x_0 (exclude from the loss calculation)
@@ -317,7 +363,7 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
 
         # self-conditioning 
         def estimate_x0(_):
-            x0, _ = model_predict(state, x_t, zeros, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=False)
+            x0, _ = model_predict2(state, x_t, zeros, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=False)
             return x0
 
         x0 = jax.lax.cond(
@@ -328,14 +374,14 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
                 
         x_t = jnp.concatenate([x_t, x0], axis=-1)
     
-    p2_loss_weight = ddpm_params['p2_loss_weight']
+#    p2_loss_weight = ddpm_params['p2_loss_weight']
 
     def compute_loss(params):
         pred = state.apply_fn({'params':params}, x_t, batched_t)
         loss = loss_fn(flatten(pred),flatten(target))
         loss = jnp.mean(loss, axis= 1)
         assert loss.shape == (B,)
-        loss = loss * p2_loss_weight[batched_t]
+        loss = loss #* p2_loss_weight[batched_t]
         return loss.mean()
     
     dynamic_scale = state.dynamic_scale
@@ -460,11 +506,12 @@ def train(config: ml_collections.ConfigDict,
   p_train_step = jax.pmap(train_step, axis_name = 'batch')
   p_apply_ema = jax.pmap(apply_ema_decay, in_axes=(0, None), axis_name = 'batch')
   p_copy_params_to_ema = jax.pmap(copy_params_to_ema, axis_name='batch')
+  p_bits_to_decimal = jax.pmap(bits_to_decimal, axis_name = 'batch')
 
   train_metrics = []
   hooks = []
 
-  sample_step = functools.partial(ddpm_sample_step, ddpm_params=ddpm_params, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0)
+  sample_step = functools.partial(ddpm_sample_step, bit_scale=config.model.bit_scale, ddpm_params=ddpm_params, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0)
   p_sample_step = jax.pmap(sample_step, axis_name='batch')
 
   if jax.process_index() == 0:
@@ -474,6 +521,7 @@ def train(config: ml_collections.ConfigDict,
   for step, batch in zip(tqdm(range(step_offset, num_steps)), train_iter):
       rng, *train_step_rng = jax.random.split(rng, num=jax.local_device_count() + 1)
       train_step_rng = jnp.asarray(train_step_rng)
+
       state, metrics = p_train_step(train_step_rng, state, batch)
       for h in hooks:
           h(step)
@@ -512,6 +560,7 @@ def train(config: ml_collections.ConfigDict,
       
       # Save a checkpoint periodically and generate samples.
       bit_shape = tuple(batch['image'].shape)
+#      print('bit shape', bit_shape)
       
       if (step + 1) % config.training.save_and_sample_every == 0 or step + 1 == num_steps:
           # generate and save sampling 
@@ -519,8 +568,12 @@ def train(config: ml_collections.ConfigDict,
           samples = []
           for i in trange(0, config.training.num_sample, config.data.batch_size):
               rng, sample_rng = jax.random.split(rng)
-              samples.append(bits_to_decimal(sample_loop(sample_rng, state, bit_shape, p_sample_step, config.ddpm.timesteps, config.model.bit_scale))
+              s = sample_loop(sample_rng, state, bit_shape, p_sample_step, config.ddpm.timesteps)
+#              print('s', s.shape)
+              samples.append(p_bits_to_decimal(s))
+#              print('s0', samples[0].shape)
           samples = jnp.concatenate(samples) # num_devices, batch, H, W, C
+#          print(samples.shape)
           
           this_sample_dir = os.path.join(sample_dir, f"iter_{step}_host_{jax.process_index()}")
           tf.io.gfile.makedirs(this_sample_dir)

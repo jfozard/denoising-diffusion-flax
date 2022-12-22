@@ -102,11 +102,12 @@ def crop_random(image, resolution):
 
 def convert_labels(image, resolution):
     s = resolution
+    print(image, s)
     a = tf.image.random_crop(image, (s, s, 1))
-#    u, aa = jnp.unique(a._numpy(), return_inverse=True)
-#    b = jnp.array(sample(jnp.range(256)/255.0, len(u)))
-#    r = b[aa].reshape(a.shape) 
-    return tf.cast(a, tf.uint8)
+    u, aa = tf.unique(tf.reshape(a, [-1])) #jnp.unique(a._numpy(), return_inverse=True)
+    b = tf.random.shuffle(tf.tile(tf.range(255),[1+aa.shape[0]//256]))[:aa.shape[0]] #jnp.array(sample(jnp.range(256)/255.0, len(u)))
+    r = tf.reshape(tf.gather(b,aa), a.shape) 
+    return tf.cast(r, tf.uint8)
 
 def get_dataset(rng, config):
     
@@ -129,7 +130,8 @@ def get_dataset(rng, config):
     def preprocess_fn(d):
         img = d['mask']
         img = convert_labels(img, config.data.image_size)
-        img = tf.image.flip_left_right(img)
+        img = tf.image.random_flip_left_right(img)
+        img = tf.image.random_flip_up_down(img)
         img= tf.image.convert_image_dtype(img, input_dtype)
         return({'image':img})
     

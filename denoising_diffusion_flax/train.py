@@ -1514,11 +1514,20 @@ def train_seg(config: ml_collections.ConfigDict,
           samples_pred = jnp.concatenate(samples_pred) # num_devices, batch, H, W, C
           samples_target = jnp.concatenate(samples_target) # num_devices, batch, H, W, C
           samples_image = jnp.concatenate(samples_image) # num_devices, batch, H, W, C
+
+          samples_all = jnp.stack((samples_pred, samples_target, samples_image), axis=2)
           
 #          print(samples.shape)
           
           this_sample_dir = os.path.join(sample_dir, f"iter_{step}_host_{jax.process_index()}")
           tf.io.gfile.makedirs(this_sample_dir)
+
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, "samples_all.png"), "wb") as fout:
+            samples_array = utils.save_image_all(samples_pred, samples_target, samples_image, config.training.num_sample, fout, padding=2)
+            if config.wandb.log_sample:
+                utils.wandb_log_image(samples_array, step+1, name='all')
+
           
           with tf.io.gfile.GFile(
               os.path.join(this_sample_dir, "samples_image.png"), "wb") as fout:

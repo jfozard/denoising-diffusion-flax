@@ -123,6 +123,35 @@ def save_image(samples, n_samples, fp, padding=2, pad_value=0.0, format=None):
 
   return ndarr
 
+
+def save_image_all(samples1, samples2, samples3, n_samples, fp, padding=2, pad_value=0.0, format=None):
+  """Make a grid of images and Save it into an image file.
+
+  Args:
+    ndarray (array_like): 4D mini-batch images of shape (B x H x W x C).
+    fp: A filename(string) or file object.
+    nrow (int, optional): Number of images displayed in each row of the grid.
+      The final grid size is ``(B / nrow, nrow)``. Default: ``8``.
+    padding (int, optional): amount of padding. Default: ``2``.
+    pad_value (float, optional): Value for the padded pixels. Default: ``0``.
+    format(Optional):  If omitted, the format to use is determined from the
+      filename extension. If a file object was used instead of a filename, this
+      parameter should always be used.
+  """
+  ndarr_all = []
+  for samples in [samples1, samples2, samples3]:
+      grid = make_grid(samples, n_samples, padding, pad_value)
+  # Add 0.5 after unnormalizing to [0, 255] to round to nearest integer
+      ndarr = jnp.clip(grid * 255.0 + 0.5, 0, 255).astype(jnp.uint8)
+      ndarr = np.array(ndarr)
+      ndarr_all.append(ndarr)
+  ndarr = np.concatenate(ndarr_all, axis=1)
+  im = Image.fromarray(ndarr)
+  im.save(fp, format=format)
+
+  return ndarr
+
+
 def wandb_log_image(samples_array, step, name='samples'):
     sample_images = wandb.Image(samples_array, caption = f"{name} step {step}")
     wandb.log({name:sample_images })

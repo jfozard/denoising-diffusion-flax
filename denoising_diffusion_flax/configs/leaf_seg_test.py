@@ -22,7 +22,7 @@ def get_config():
   training.log_every_steps = 100
   training.loss_type = 'l2'
   training.half_precision = False
-  training.save_and_sample_every = 1000
+  training.save_and_sample_every = 100
   training.num_sample = 64
 
 

@@ -154,7 +154,7 @@ class ResnetBlock(nn.Module):
 
         h = WeightStandardizedConv(
             features=self.dim, kernel_size=(3, 3), padding=1, name='conv_0')(x)
-        h =nn.GroupNorm(num_groups=self.groups, dtype=self.dtype, name='norm_0')(h)
+        h = nn.GroupNorm(num_groups=self.groups, dtype=self.dtype, name='norm_0')(h)
 
         # add in timestep embedding
         time_emb = nn.Dense(features=2 * self.dim,dtype=self.dtype,
@@ -162,6 +162,44 @@ class ResnetBlock(nn.Module):
         time_emb = time_emb[:,  jnp.newaxis, jnp.newaxis, :]  # [B, H, W, C]
         scale, shift = jnp.split(time_emb, 2, axis=-1)
         h = h * (1 + scale) + shift
+
+        h = nn.swish(h)
+
+        h = WeightStandardizedConv(
+            features=self.dim, kernel_size=(3, 3), padding=1, name='conv_1')(h)
+        h = nn.swish(nn.GroupNorm(num_groups=self.groups, dtype=self.dtype, name='norm_1')(h))
+
+        if C != self.dim:
+            x = nn.Conv(
+              features=self.dim, 
+              kernel_size= (1,1),
+              dtype=self.dtype,
+              name='res_conv_0')(x)
+
+        assert x.shape == h.shape
+
+        return x + h
+
+class SimpleResnetBlock(nn.Module):
+    """Convolutional residual block."""
+    dim: int = None
+    groups: Optional[int] = 8
+    dtype: Any = jnp.float32
+
+    @nn.compact
+    def __call__(self, x):
+        """
+        Args:
+          x: jnp.ndarray of shape [B, H, W, C]
+        Returns:
+          x: jnp.ndarray of shape [B, H, W, C]
+        """
+
+        B, _, _, C = x.shape
+
+        h = WeightStandardizedConv(
+            features=self.dim, kernel_size=(3, 3), padding=1, name='conv_0')(x)
+        h =nn.GroupNorm(num_groups=self.groups, dtype=self.dtype, name='norm_0')(h)
 
         h = nn.swish(h)
 
@@ -367,6 +405,182 @@ class Unet(nn.Module):
         out_dim = default_out_dim if self.out_dim is None else self.out_dim
         
         return(nn.Conv(out_dim, kernel_size=(1,1), dtype=self.dtype, name= 'final.conv_0')(out)/10.0)
+
+
+
+
+# Simple UNet to predict cell boundaries - this (concatenated to image) provided as additional information.
+# Might be sensible to look at TransUNet (or whatever they call it) from diffusion models for predicting new views of tissues)
+
+class EncodingUnet(nn.Module):
+    dim: int
+    init_dim: Optional[int] = None # if None, same as dim
+    out_dim: Optional[int] = None 
+    dim_mults: Tuple[int, int, int, int] = (1, 2, 4, 8)
+    resnet_block_groups: int = 8
+    dtype: Any = jnp.float32
+
+    @nn.compact
+    def __call__(self, x):
+        B, H, W, C = x.shape
+
+        init_dim = self.dim if self.init_dim is None else self.init_dim
+        hs = []
+        h = nn.Conv(
+            features= init_dim,
+            kernel_size=(7, 7),
+            padding=3,
+            name='init.conv_0',
+            dtype = self.dtype)(x)
+
+        hs.append(h)
+        # downsampling
+        num_resolutions = len(self.dim_mults)
+        for ind in range(num_resolutions):
+          dim_in = h.shape[-1]
+          h = SimpleResnetBlock(
+            dim=dim_in, groups=self.resnet_block_groups, dtype=self.dtype, name=f'down_{ind}.resblock_0')(h)
+          hs.append(h)
+
+          h = SimpleResnetBlock(dim=dim_in, groups=self.resnet_block_groups, dtype=self.dtype, name=f'down_{ind}.resblock_1')(h)
+          hs.append(h)
+
+          if ind < num_resolutions -1:
+            h = Downsample(dim=self.dim * self.dim_mults[ind], dtype=self.dtype, name=f'down_{ind}.downsample_0')(h)
+        
+        mid_dim = self.dim * self.dim_mults[-1]
+        h = nn.Conv(features = mid_dim, kernel_size = (3,3), padding=1, dtype=self.dtype, name=f'down_{num_resolutions-1}.conv_0')(h)
+
+
+        # middle
+        h = SimpleResnetBlock(dim= mid_dim, groups= self.resnet_block_groups, dtype=self.dtype, name = 'mid.resblock_0')(h)
+        h = SimpleResnetBlock(dim= mid_dim, groups= self.resnet_block_groups, dtype=self.dtype, name = 'mid.resblock_1')(h)
+
+       # upsampling 
+        for ind in reversed(range(num_resolutions)):
+
+           dim_in = self.dim * self.dim_mults[ind]
+           dim_out = self.dim * self.dim_mults[ind-1] if ind >0 else init_dim
+           
+           assert h.shape[-1] == dim_in
+           h = jnp.concatenate([h, hs.pop()], axis=-1)
+           assert h.shape[-1] == dim_in + dim_out
+           h = SimpleResnetBlock(dim=dim_in, groups=self.resnet_block_groups, dtype=self.dtype, name=f'up_{ind}.resblock_0')(h)
+
+           h = jnp.concatenate([h, hs.pop()], axis=-1)
+           assert h.shape[-1] == dim_in + dim_out
+
+           h = SimpleResnetBlock(dim=dim_in, groups=self.resnet_block_groups, dtype=self.dtype, name=f'up_{ind}.resblock_1')(h)
+
+           assert h.shape[-1] == dim_in
+           if ind > 0:
+             h = Upsample(dim = dim_out, dtype=self.dtype, name = f'up_{ind}.upsample_0')(h)
+        
+        h = nn.Conv(features = init_dim, kernel_size=(3,3), padding=1, dtype=self.dtype, name=f'up_0.conv_0')(h)
+        
+        # final 
+        h = jnp.concatenate([h, hs.pop()], axis=-1)
+        assert h.shape[-1] == init_dim * 2
+    
+        out = SimpleResnetBlock(dim=self.dim,groups=self.resnet_block_groups, dtype=self.dtype, name = 'final.resblock_0' )(h)
+        
+        out_dim = default_out_dim if self.out_dim is None else self.out_dim
+        
+        return(nn.Conv(out_dim, kernel_size=(1,1), dtype=self.dtype, name= 'final.conv_0')(out))
+
+class SegUnet(nn.Module):
+    dim: int
+    init_dim: Optional[int] = None # if None, same as dim
+    out_dim: Optional[int] = None 
+    dim_mults: Tuple[int, int, int, int] = (1, 2, 4, 8)
+    resnet_block_groups: int = 8
+    learned_variance: bool = False
+    dtype: Any = jnp.float32
+    simple: bool = False
+    full_attn_at_top: bool=False
+
+    @nn.compact
+    def __call__(self, x, time):
+        B, H, W, C = x.shape
+
+        init_dim = self.dim if self.init_dim is None else self.init_dim
+        hs = []
+        h = nn.Conv(
+            features= init_dim,
+            kernel_size=(7, 7),
+            padding=3,
+            name='init.conv_0',
+            dtype = self.dtype)(x)
+
+        hs.append(h)
+        # use sinusoidal embeddings to encode timesteps
+        time_emb = SinusoidalPosEmb(self.dim, dtype=self.dtype)(time)  # [B. dim]
+        time_emb = nn.Dense(features=self.dim * 4, dtype=self.dtype, name='time_mlp.dense_0')(time_emb)
+        time_emb = nn.Dense(features=self.dim * 4, dtype=self.dtype, name='time_mlp.dense_1')(nn.gelu(time_emb))  # [B, 4*dim]
+        
+        # downsampling
+        num_resolutions = len(self.dim_mults)
+        for ind in range(num_resolutions):
+          dim_in = h.shape[-1]
+          h = ResnetBlock(
+            dim=dim_in, groups=self.resnet_block_groups, dtype=self.dtype, name=f'down_{ind}.resblock_0')(h, time_emb)
+          hs.append(h)
+
+          h = ResnetBlock(dim=dim_in, groups=self.resnet_block_groups, dtype=self.dtype, name=f'down_{ind}.resblock_1')(h, time_emb)
+          if not self.simple:
+            h = AttnBlock(dtype=self.dtype, name=f'down_{ind}.attnblock_0')(h)
+          hs.append(h)
+
+          if ind < num_resolutions -1:
+            h = Downsample(dim=self.dim * self.dim_mults[ind], dtype=self.dtype, name=f'down_{ind}.downsample_0')(h)
+        
+        mid_dim = self.dim * self.dim_mults[-1]
+        h = nn.Conv(features = mid_dim, kernel_size = (3,3), padding=1, dtype=self.dtype, name=f'down_{num_resolutions-1}.conv_0')(h)
+
+
+        # middle
+        h =  ResnetBlock(dim= mid_dim, groups= self.resnet_block_groups, dtype=self.dtype, name = 'mid.resblock_0')(h, time_emb)
+        if not self.simple:
+            h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_0')(h)
+        else:
+            h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_0')(h)
+        
+        h = ResnetBlock(dim= mid_dim, groups= self.resnet_block_groups, dtype=self.dtype, name = 'mid.resblock_1')(h, time_emb)
+
+        # upsampling 
+        for ind in reversed(range(num_resolutions)):
+
+           dim_in = self.dim * self.dim_mults[ind]
+           dim_out = self.dim * self.dim_mults[ind-1] if ind >0 else init_dim
+           
+           assert h.shape[-1] == dim_in
+           h = jnp.concatenate([h, hs.pop()], axis=-1)
+           assert h.shape[-1] == dim_in + dim_out
+           h = ResnetBlock(dim=dim_in, groups=self.resnet_block_groups, dtype=self.dtype, name=f'up_{ind}.resblock_0')(h, time_emb)
+
+           h = jnp.concatenate([h, hs.pop()], axis=-1)
+           assert h.shape[-1] == dim_in + dim_out
+           h = ResnetBlock(dim=dim_in, groups=self.resnet_block_groups, dtype=self.dtype, name=f'up_{ind}.resblock_1')(h, time_emb)
+           if not self.simple:
+               h = AttnBlock(dtype=self.dtype, name=f'up_{ind}.attnblock_0')(h)
+
+           assert h.shape[-1] == dim_in
+           if ind > 0:
+             h = Upsample(dim = dim_out, dtype=self.dtype, name = f'up_{ind}.upsample_0')(h)
+        
+        h = nn.Conv(features = init_dim, kernel_size=(3,3), padding=1, dtype=self.dtype, name=f'up_0.conv_0')(h)
+        
+        # final 
+        h = jnp.concatenate([h, hs.pop()], axis=-1)
+        assert h.shape[-1] == init_dim * 2
+    
+        out = ResnetBlock(dim=self.dim,groups=self.resnet_block_groups, dtype=self.dtype, name = 'final.resblock_0' )(h, time_emb)
+        
+        default_out_dim = C * (1 if not self.learned_variance else 2)
+        out_dim = default_out_dim if self.out_dim is None else self.out_dim
+        
+        return(nn.Conv(out_dim, kernel_size=(1,1), dtype=self.dtype, name= 'final.conv_0')(out)/10.0)
+
 
 
 

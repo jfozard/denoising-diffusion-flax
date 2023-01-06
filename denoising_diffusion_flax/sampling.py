@@ -64,6 +64,28 @@ def model_predict(state, x, x0, t, ddpm_params, self_condition, is_pred_x0, use_
     return x0_pred, noise_pred
 
 
+# called by p_loss and ddpm_sample_step - both use pmap
+def seg_model_predict(state, x, x0, y, t, ddpm_params, self_condition, is_pred_x0, use_ema=True):
+    if use_ema:
+        variables = {'params': state.params_ema}
+    else:
+        variables = {'params': state.params}
+    
+    if self_condition:
+        pred = state.apply_fn(variables, jnp.concatenate([x, x0, y],axis=-1), t)
+    else:
+        pred = state.apply_fn(variables, jnp.concatenate([x, y],axis=-1), t)
+
+    if is_pred_x0: # if the objective is is_pred_x0, pred == x0_pred
+        x0_pred = pred
+        noise_pred =  x0_to_noise(pred, x, t, ddpm_params)
+    else:
+        noise_pred = pred
+        x0_pred = noise_to_x0(pred, x, t, ddpm_params)
+    
+    return x0_pred, noise_pred
+
+
 def ddpm_sample_step(state, rng, x, t, x0_last, bit_scale, ddpm_params, self_condition=False, is_pred_x0=False):
 
     print(bit_scale, x.shape, x0_last.shape) 
@@ -73,6 +95,24 @@ def ddpm_sample_step(state, rng, x, t, x0_last, bit_scale, ddpm_params, self_con
         x0, v = model_predict(state, x, x0_last, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=True) 
     else:
         x0, v = model_predict(state, x, None, batched_t,ddpm_params, self_condition, is_pred_x0, use_ema=True)
+    
+    # make sure x0 between [-1,1]
+    x0 = jnp.clip(x0, -bit_scale, bit_scale)
+
+    posterior_mean, posterior_log_variance = get_posterior_mean_variance(x, t, x0, v, ddpm_params)
+    x = posterior_mean + jnp.exp(0.5 *  posterior_log_variance) * jax.random.normal(rng, x.shape) 
+
+    return x, x0
+
+def seg_sample_step(state, rng, x, y, t, x0_last, bit_scale, ddpm_params, self_condition=False, is_pred_x0=False):
+
+    print(bit_scale, x.shape, x0_last.shape) 
+    batched_t = jnp.ones((x.shape[0],), dtype=jnp.int32) * t
+    
+    if self_condition:
+        x0, v = seg_model_predict(state, x, x0_last, y, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=True) 
+    else:
+        x0, v = seg_model_predict(state, x, None, y, batched_t,ddpm_params, self_condition, is_pred_x0, use_ema=True)
     
     # make sure x0 between [-1,1]
     x0 = jnp.clip(x0, -bit_scale, bit_scale)
@@ -97,6 +137,28 @@ def sample_loop(rng, state, shape, p_sample_step, timesteps):
         step_rng = jnp.asarray(step_rng)
 #        print(shape, x.shape, x0.shape)
         x, x0 = p_sample_step(state, step_rng, x, jax_utils.replicate(t), x0)
+        list_x0.append(x0)
+    # normalize to [0,1]
+    #img = unnormalize_to_zero_to_one(jnp.asarray(x0))
+    
+    return jnp.asarray(x0)
+
+def sample_loop_seg(rng, state, batch, p_sample_step, timesteps):
+    
+    # shape include the device dimension: (device, per_device_batch_size, H,W,C)
+    rng, x_rng = jax.random.split(rng)
+    list_x0 = []
+    # generate the initial sample (pure noise)
+    x = batch['mask']
+    y = batch['image']
+#    x = jax.random.normal(x_rng, shape)
+    x0 = jnp.zeros_like(x) # initialize x0 for self-conditioning
+    # sample step
+    for t in reversed(jnp.arange(timesteps)):
+        rng, *step_rng = jax.random.split(rng, num=jax.local_device_count() + 1)
+        step_rng = jnp.asarray(step_rng)
+#        print(shape, x.shape, x0.shape)
+        x, x0 = p_sample_step(state, step_rng, x, y, jax_utils.replicate(t), x0)
         list_x0.append(x0)
     # normalize to [0,1]
     #img = unnormalize_to_zero_to_one(jnp.asarray(x0))

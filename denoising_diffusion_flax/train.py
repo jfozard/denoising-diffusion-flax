@@ -1,3 +1,12 @@
+
+import flax
+from flax.training import train_state
+from flax.training import common_utils
+from flax.training import dynamic_scale as dynamic_scale_lib
+from flax.training import checkpoints
+from flax import jax_utils
+
+
 import functools
 import time
 import os
@@ -12,12 +21,6 @@ from clu import periodic_actions
 from typing import Any, Optional, Callable
 from tqdm import tqdm, trange
 
-import flax
-from flax.training import train_state
-from flax.training import common_utils
-from flax.training import dynamic_scale as dynamic_scale_lib
-from flax.training import checkpoints
-from flax import jax_utils
 
 import optax
 
@@ -33,7 +36,7 @@ import wandb
 
 import unet
 import utils
-from sampling import sample_loop, ddpm_sample_step, model_predict
+from sampling import sample_loop, sample_loop_seg, ddpm_sample_step, model_predict, seg_sample_step, seg_model_predict
 
 
 def flatten(x):
@@ -45,6 +48,9 @@ def l2_loss(logit, target):
 def l1_loss(logit, target): 
     return jnp.abs(logit - target)
 
+def bce_loss(logit, target):
+    return None
+  
 def normalize_to_neg_one_to_one(img):
     return img * 2 - 1
 
@@ -75,6 +81,28 @@ def bits_to_decimal(x, bits = 8):
     dec = reduce(x * mask, 'b h w c d -> b h w c', 'sum')
     return np.clip((dec)/ 255, 0., 1.)
 
+def boundary(x):
+
+#    print(x.shape)
+#    paddings_u = tf.constant([[0,0,1,0],[0,0,0,0]]) # Can this be made general?
+    paddings_u = tf.constant([[0,0],[0,0],[1,0],[0,0]]) # Can this be made general?                         
+    x_u = tf.roll(tf.pad(x, paddings_u, 'REFLECT'), shift=1, axis=2)[:,:,1:,:]
+    bdd_u = tf.math.not_equal(x, x_u)
+
+    paddings_d = tf.constant([[0,0],[0,0],[0,1],[0,0]]) # Can this be made general?                         
+    x_d = tf.roll(tf.pad(x, paddings_d, 'REFLECT'), shift=-1, axis=2)[:,:,:-1,:]
+    bdd_d = tf.math.not_equal(x, x_d)
+
+    paddings_r = tf.constant([[0,0],[1,0],[0,0],[0,0]]) # Can this be made general?                         
+    x_r = tf.roll(tf.pad(x, paddings_r, 'REFLECT'), shift=1, axis=1)[:,1:,:,:]
+    bdd_r = tf.math.not_equal(x, x_r)
+
+    paddings_l = tf.constant([[0,0],[0,1],[0,0],[0,0]]) # Can this be made general?                         
+                                                
+    x_l = tf.roll(tf.pad(x, paddings_l, 'REFLECT'), shift=-1, axis=1)[:,:-1,:,:]
+    bdd_l = tf.math.not_equal(x, x_l)
+    bdd = tf.math.logical_or(tf.math.logical_or(bdd_u, bdd_r), tf.math.logical_or(bdd_d, bdd_l))
+    return bdd
 
   
 def crop_resize(image, resolution):
@@ -109,6 +137,31 @@ def convert_labels(image, resolution):
     r = tf.reshape(tf.gather(b,aa), a.shape) 
     return tf.cast(r, tf.uint8)
 
+
+def crop_random_both(image, labels, resolution, seed):
+  seed = tf.random.experimental.stateless_split(seed, num=2)
+  s = tf.random.stateless_uniform((1,), seed[0,:], int(0.7*resolution), resolution+1)[0]
+  image = tf.image.stateless_random_crop(image, (s, s, 1), seed=seed[1,:])
+  labels = tf.image.stateless_random_crop(labels, (s, s, 1), seed=seed[1,:])
+  image = tf.image.resize(
+      image,
+      size=(resolution, resolution),
+      antialias=True,
+      method=tf.image.ResizeMethod.BICUBIC)
+  labels = tf.image.resize(
+      labels,
+      size=(resolution, resolution),
+      antialias=False,
+      method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
+  return tf.cast(image, tf.uint8), tf.cast(labels, tf.uint8)
+                               
+
+def shuffle_labels(mask):
+    u, aa = tf.unique(tf.reshape(mask, [-1])) 
+    b = tf.random.shuffle(tf.tile(tf.range(255),[1+aa.shape[0]//256]))[:aa.shape[0]] 
+    r = tf.reshape(tf.gather(b,aa), mask.shape) 
+    return tf.cast(r, tf.uint8)
+  
 def get_dataset(rng, config):
     
     if config.data.batch_size % jax.device_count() > 0:
@@ -177,6 +230,171 @@ def get_dataset(rng, config):
     return(it)   
 
 
+def get_dataset_unet(rng, config, split_name='train'):
+    
+    if config.data.batch_size % jax.device_count() > 0:
+        raise ValueError('Batch size must be divisible by the number of devices')
+    
+    batch_size = config.data.batch_size //jax.process_count()
+
+    platform = jax.local_devices()[0].platform
+    if config.training.half_precision:
+        if platform == 'tpu':
+            input_dtype = tf.bfloat16
+        else:
+            input_dtype = tf.float16
+    else: input_dtype = tf.float32
+
+    dataset_builder = tfds.builder(config.data.dataset)
+    dataset_builder.download_and_prepare()
+
+    def preprocess_fn(d, seed):
+        img = d['image']
+        mask = d['mask']
+        seeds = tf.random.experimental.stateless_split(seed, num=3)
+        img, mask = crop_random_both(img, mask, config.data.image_size, seeds[0])
+        img = tf.image.stateless_random_flip_left_right(img, seed=seeds[1])
+        img = tf.image.stateless_random_flip_up_down(img, seed=seeds[2])
+        mask = tf.image.stateless_random_flip_left_right(mask, seed=seeds[1])
+        mask = tf.image.stateless_random_flip_up_down(mask, seed=seeds[2])
+        img = tf.image.convert_image_dtype(img, input_dtype)
+        mask = tf.image.convert_image_dtype(mask, input_dtype)
+        return({'image':img, 'mask':mask})
+    
+    # create split for current process 
+    train_examples = 8 #dataset_builder.info.splits[split_name].num_examples
+    split_size = train_examples // jax.process_count()
+    start = jax.process_index() * split_size
+    split = f'{split_name}[{start}:{start + split_size}]'
+
+    ds = dataset_builder.as_dataset(split=split)
+    options = tf.data.Options()
+    options.threading.private_threadpool_size = 48
+    ds.with_options(options)
+
+    if config.data.cache:
+        ds= ds.cache()   
+
+    if split_name !='test':
+        ds = ds.repeat()
+        ds = ds.shuffle(16 * batch_size , seed=0)
+
+    counter = tf.data.Dataset.counter(1) #tf.random.experimental.stateless_split(rng, num=2)
+    ds = tf.data.Dataset.zip((ds, (counter, counter)))
+    
+    ds = ds.map(preprocess_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+    # (local_devices * device_batch_size), height, width, c
+    ds = ds.batch(batch_size, drop_remainder=True)
+    ds = ds.prefetch(max(10, train_examples))
+    return ds
+    
+def format_ds(ds):
+    def scale_and_reshape(xs):
+        local_device_count = jax.local_device_count()
+        def _reshape(x):
+           # Use _numpy() for zero-copy conversion between TF and NumPy.
+           x = x._numpy()  # pylint: disable=protected-access
+           # normalize to [-1,1]
+           #x = decimal_to_bits(x)*config.model.bit_scale
+           #x = normalize_to_neg_one_to_one(x)
+          # reshape (batch_size, height, width, channels) to
+         # (local_devices, device_batch_size, height, width, 3)
+           return x.reshape((local_device_count, -1) + x.shape[1:])
+
+#        print('shapes', xs['image'].shape, xs['mask'].shape)
+        xs = {'image': normalize_to_neg_one_to_one(xs['image']),
+              'mask': boundary(xs['mask']) }
+         
+        return jax.tree_map(_reshape, xs)
+
+    it = map(scale_and_reshape, ds)
+    it = jax_utils.prefetch_to_device(it, 2)
+
+    return(it)   
+
+
+def get_dataset_seg(rng, config, split_name='train'):
+    
+    if config.data.batch_size % jax.device_count() > 0:
+        raise ValueError('Batch size must be divisible by the number of devices')
+    
+    batch_size = config.data.batch_size //jax.process_count()
+
+    platform = jax.local_devices()[0].platform
+    if config.training.half_precision:
+        if platform == 'tpu':
+            input_dtype = tf.bfloat16
+        else:
+            input_dtype = tf.float16
+    else: input_dtype = tf.float32
+
+    dataset_builder = tfds.builder(config.data.dataset)
+    dataset_builder.download_and_prepare()
+
+    def preprocess_fn(d, seed):
+        img = d['image']
+        mask = d['mask']
+        seeds = tf.random.experimental.stateless_split(seed, num=3)
+        img, mask = crop_random_both(img, mask, config.data.image_size, seeds[0])
+        img = tf.image.stateless_random_flip_left_right(img, seed=seeds[1])
+        img = tf.image.stateless_random_flip_up_down(img, seed=seeds[2])
+        mask = tf.image.stateless_random_flip_left_right(mask, seed=seeds[1])
+        mask = tf.image.stateless_random_flip_up_down(mask, seed=seeds[2])
+        img = tf.image.convert_image_dtype(img, input_dtype)
+        mask = tf.image.convert_image_dtype(mask, input_dtype)
+        return({'image':img, 'mask':mask})
+
+    
+    # create split for current process 
+    train_examples = dataset_builder.info.splits[split_name].num_examples
+    split_size = train_examples // jax.process_count()
+    start = jax.process_index() * split_size
+    split = f'{split_name}[{start}:{start + split_size}]'
+
+    ds = dataset_builder.as_dataset(split=split)
+    options = tf.data.Options()
+    options.threading.private_threadpool_size = 48
+    ds.with_options(options)
+
+    if config.data.cache:
+        ds= ds.cache()   
+
+    ds = ds.repeat()
+    ds = ds.shuffle(16 * batch_size , seed=0)
+
+    counter = tf.data.Dataset.counter(1) #tf.random.experimental.stateless_split(rng, num=2)
+    ds = tf.data.Dataset.zip((ds, (counter, counter)))
+
+    ds = ds.map(preprocess_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+    # (local_devices * device_batch_size), height, width, c
+    ds = ds.batch(batch_size, drop_remainder=True)
+    ds = ds.prefetch(10)
+
+    def scale_and_reshape(xs):
+        local_device_count = jax.local_device_count()
+        def _scale_and_reshape(x):
+           # Use _numpy() for zero-copy conversion between TF and NumPy.
+           #x = x._numpy()  # pylint: disable=protected-access
+           # normalize to [-1,1]
+           #x = decimal_to_bits(x)*config.model.bit_scale
+           #x = normalize_to_neg_one_to_one(x)
+          # reshape (batch_size, height, width, channels) to
+         # (local_devices, device_batch_size, height, width, 3)
+           return x.reshape((local_device_count, -1) + x.shape[1:])
+
+        xs = {'image': normalize_to_neg_one_to_one(xs['image'])._numpy(),
+              'mask': decimal_to_bits(xs['mask']._numpy())*config.model.bit_scale }
+
+         
+        return jax.tree_map(_scale_and_reshape, xs)
+
+    it = map(scale_and_reshape, ds)
+    it = jax_utils.prefetch_to_device(it, 2)
+
+    return(it)   
+
+
+  
 def create_model(*, model_cls, half_precision, **kwargs):
   platform = jax.local_devices()[0].platform
   if half_precision:
@@ -189,7 +407,7 @@ def create_model(*, model_cls, half_precision, **kwargs):
   return model_cls(dtype=model_dtype, **kwargs)
 
 
-def initialized(key, image_size,image_channel, model):
+def initialized(key, image_size, image_channel, model):
 
   input_shape = (1, image_size, image_size, image_channel)
 
@@ -206,6 +424,44 @@ def initialized(key, image_size,image_channel, model):
       )
 
   return variables['params']
+
+def initialized_unet(key, image_size,image_channel, model):
+
+  input_shape = (1, image_size, image_size, image_channel)
+
+  print('init shape', input_shape)
+  
+  @jax.jit
+  def init(*args):
+    return model.init(*args)
+
+  variables = init(
+      {'params': key}, 
+      jnp.ones(input_shape, model.dtype), # x noisy image
+      )
+
+  return variables['params']
+
+
+def initialized_seg(key, image_size,image_channel, model):
+
+  input_shape = (1, image_size, image_size, image_channel+1)
+
+  print('init shape', input_shape)
+  
+  @jax.jit
+  def init(*args):
+    return model.init(*args)
+
+  variables = init(
+      {'params': key}, 
+      jnp.ones(input_shape, model.dtype), # x noisy image
+      jnp.ones(input_shape[:1], model.dtype) # t
+
+  )
+
+  return variables['params']
+
 
 
 class TrainState(train_state.TrainState):
@@ -248,6 +504,75 @@ def create_train_state(rng, config: ml_collections.ConfigDict):
   return state
 
 
+def create_train_state_unet(rng, config: ml_collections.ConfigDict):
+  """Creates initial `TrainState`."""
+
+  dynamic_scale = None
+  platform = jax.local_devices()[0].platform
+
+  if config.training.half_precision and platform == 'gpu':
+    dynamic_scale = dynamic_scale_lib.DynamicScale()
+  else:
+    dynamic_scale = None
+
+  model = create_model(
+      model_cls=unet.EncoderUnet, 
+      half_precision=config.training.half_precision,
+      dim = config.model.dim, 
+      out_dim =  config.data.channels,
+      dim_mults = config.model.dim_mults)
+
+  rng, rng_params = jax.random.split(rng)
+  image_size = config.data.image_size
+  input_dim = config.data.channels * 2 if config.ddpm.self_condition else config.data.channels
+  params = initialized_unet(rng_params, image_size, input_dim, model)
+
+  tx = create_optimizer(config.optim)
+
+  state = TrainState.create(
+      apply_fn=model.apply, 
+      params=params, 
+      tx=tx, 
+      params_ema=params,
+      dynamic_scale=dynamic_scale)
+
+  return state
+
+def create_train_state_seg(rng, config: ml_collections.ConfigDict):
+  """Creates initial `TrainState`."""
+
+  dynamic_scale = None
+  platform = jax.local_devices()[0].platform
+
+  if config.training.half_precision and platform == 'gpu':
+    dynamic_scale = dynamic_scale_lib.DynamicScale()
+  else:
+    dynamic_scale = None
+
+  model = create_model(
+      model_cls=unet.SegUnet, 
+      half_precision=config.training.half_precision,
+      dim = config.model.dim, 
+      out_dim =  config.data.channels,
+      dim_mults = config.model.dim_mults)
+
+  rng, rng_params = jax.random.split(rng)
+  image_size = config.data.image_size
+  input_dim = config.data.channels 
+  params = initialized_seg(rng_params, image_size, input_dim, model)
+
+  tx = create_optimizer(config.optim)
+
+  state = TrainState.create(
+      apply_fn=model.apply, 
+      params=params, 
+      tx=tx, 
+      params_ema=params,
+      dynamic_scale=dynamic_scale)
+
+  return state
+
+
 def create_optimizer(config):
 
     if config.optimizer == 'Adam':
@@ -267,6 +592,8 @@ def get_loss_fn(config):
         loss_fn = l1_loss
     elif config.training.loss_type == 'l2':
         loss_fn = l2_loss
+    elif config.training.loss_type == 'bce':
+        loss_fn = bce_loss
     else:
         raise NotImplementedError(
            f'loss_type {config.training.loss_tyoe} not supported yet!')
@@ -313,18 +640,19 @@ def alpha_cosine_log_snr(t, s: float = 0.008):
 def log_snr_to_alpha_sigma(log_snr):
     return jnp.sqrt(jax.nn.sigmoid(log_snr)), jnp.sqrt(jax.nn.sigmoid(-log_snr))
 
-def model_predict2(state, x, x0, t, ddpm_params, self_condition, is_pred_x0, use_ema=True):
+def model_predict2(state, x, x0, y, t, ddpm_params, self_condition, is_pred_x0, use_ema=True):
     if use_ema:
         variables = {'params': state.params_ema}
     else:
         variables = {'params': state.params}
     
     if self_condition:
-        pred = state.apply_fn(variables, jnp.concatenate([x, x0],axis=-1), t)
+        pred = state.apply_fn(variables, jnp.concatenate([x, x0, y],axis=-1), t)
     else:
-        pred = state.apply_fn(variables, x, t)
+        pred = state.apply_fn(variables, jnp.concatenate([x, y],axis=-1), t)
     
     return pred, None
+
 
 # train step
 def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pred_x0=False, pmap_axis='batch'):
@@ -333,7 +661,7 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
     x = batch['image']
     assert x.dtype in [jnp.float32, jnp.float64]
     
-    # create batched timesteps: t with shape (B,)
+   # create batched timesteps: t with shape (B,)
     B, H, W, C = x.shape
     rng, t_rng = jax.random.split(rng)
     batched_t = jax.random.randint(t_rng, shape=(B,), dtype = jnp.int32, minval=0, maxval= len(ddpm_params['betas']))
@@ -434,6 +762,236 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
     
      
     return new_state, metrics
+
+# train step
+def seg_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pred_x0=False, pmap_axis='batch'):
+    
+    # run the forward diffusion process to generate noisy image x_t at timestep t
+    x = batch['mask']
+    y = batch['image']
+    assert x.dtype in [jnp.float32, jnp.float64]
+    
+   # create batched timesteps: t with shape (B,)
+    B, H, W, C = x.shape
+    rng, t_rng = jax.random.split(rng)
+    batched_t = jax.random.randint(t_rng, shape=(B,), dtype = jnp.int32, minval=0, maxval= len(ddpm_params['betas']))
+#    batched_t = jax.random.uniform(t_rng, shape=(B,), minval=0, maxval=0.9999)
+     
+  
+    # sample a noise (input for q_sample)
+    rng, noise_rng = jax.random.split(rng)
+    noise = jax.random.normal(noise_rng, x.shape)
+    # if is_pred_x0 == True, the target for loss calculation is x, else noise
+    target = x if is_pred_x0 else noise
+ 
+    #noise_level = alpha_cosine_log_snr(batched_t)
+
+    #padded_noise_level = right_pad_dims_to(x, noise_level)
+
+    #alpha, sigma = log_snr_to_alpha_sigma(padded_noise_level)
+
+    # generate the noisy image (input for denoise model)
+    #x_t = alpha * x + sigma * noise
+    #print('x_t:', x_t.abs().mean())
+    x_t = q_sample(x, batched_t, noise, ddpm_params)
+    
+    # if doing self-conditioning, 50% of the time first estimate x_0 = f(x_t, 0, t) and then use the estimated x_0 for Self-Conditioning
+    # we don't backpropagate through the estimated x_0 (exclude from the loss calculation)
+    # this technique will slow down training by 25%, but seems to lower FID significantly  
+    if self_condition:
+
+        rng, condition_rng = jax.random.split(rng)
+        zeros = jnp.zeros_like(x_t)
+
+        # self-conditioning 
+        def estimate_x0(_):
+            x0, _ = model_predict2(state, x_t, zeros, y, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=False)
+#            x0, _ = model_predict2(state, x_t, zeros, noise_level, ddpm_params, self_condition, is_pred_x0, use_ema=False)
+            return x0
+
+        x0 = jax.lax.cond(
+            jax.random.uniform(condition_rng, shape=(1,))[0] < 0.5,
+            estimate_x0,
+            lambda _ :zeros,
+            None)
+                
+        x_t = jnp.concatenate([x_t, x0], axis=-1)
+    
+#    p2_loss_weight = ddpm_params['p2_loss_weight']
+
+    def compute_loss(params):
+        pred = state.apply_fn({'params':params}, jnp.concatenate([x_t, y], axis=-1), batched_t)
+        loss = loss_fn(flatten(pred),flatten(target))
+        loss = jnp.mean(loss, axis= 1)
+        assert loss.shape == (B,)
+        loss = loss #* p2_loss_weight[batched_t]
+        return loss.mean()
+    
+    dynamic_scale = state.dynamic_scale
+
+    if dynamic_scale:
+        grad_fn = dynamic_scale.value_and_grad(compute_loss, axis_name=pmap_axis)
+        dynamic_scale, is_fin, loss, grads = grad_fn(state.params)
+        # dynamic loss takes care of averaging gradients across replicas
+    else:
+        grad_fn = jax.value_and_grad(compute_loss)
+        loss, grads = grad_fn(state.params)
+        #  Re-use same axis_name as in the call to `pmap(...train_step,axis=...)` in the train function
+        grads = jax.lax.pmean(grads, axis_name=pmap_axis)
+    
+    loss = jax.lax.pmean(loss, axis_name=pmap_axis)
+    loss_ema = jax.lax.pmean(compute_loss(state.params_ema), axis_name=pmap_axis)
+
+#    pred = state.apply_fn({'params':state.params}, x_t, batched_t)
+          
+    
+    
+    metrics = {'loss': loss,
+               'loss_ema': loss_ema,
+               'x_t': jnp.mean(jnp.abs(x_t)),
+ #              'pred': jnp.mean(jnp.abs(pred)),
+ #              'target':  jnp.mean(jnp.abs(target)) }
+               }
+    
+    new_state = state.apply_gradients(grads=grads)
+
+    if dynamic_scale:
+    # if is_fin == False the gradients contain Inf/NaNs and optimizer state and
+    # params should be restored (= skip this step).
+        new_state = new_state.replace(
+            opt_state=jax.tree_map(
+                functools.partial(jnp.where, is_fin),
+                new_state.opt_state,
+                state.opt_state),
+            params=jax.tree_map(
+                functools.partial(jnp.where, is_fin),
+                new_state.params,
+                state.params),
+            dynamic_scale=dynamic_scale)
+        metrics['scale'] = dynamic_scale.scale
+    
+     
+    return new_state, metrics
+
+
+
+
+  # train step
+def unet_loss(rng, state, batch, ddpm_params, loss_fn, pmap_axis='batch'):
+    
+    # run the forward diffusion process to generate noisy image x_t at timestep t
+    x = batch['image']
+    target = batch['mask']
+    
+    assert x.dtype in [jnp.float32, jnp.float64]
+    
+   # create batched timesteps: t with shape (B,)
+    B, H, W, C = x.shape
+  
+    def compute_loss(params):
+        pred = state.apply_fn({'params':params}, x)
+        loss = loss_fn(flatten(pred),flatten(target))
+        loss = jnp.mean(loss, axis= 1)
+        assert loss.shape == (B,)
+        return loss.mean()
+    
+    dynamic_scale = state.dynamic_scale
+
+    if dynamic_scale:
+        grad_fn = dynamic_scale.value_and_grad(compute_loss, axis_name=pmap_axis)
+        dynamic_scale, is_fin, loss, grads = grad_fn(state.params)
+        # dynamic loss takes care of averaging gradients across replicas
+    else:
+        grad_fn = jax.value_and_grad(compute_loss)
+        loss, grads = grad_fn(state.params)
+        #  Re-use same axis_name as in the call to `pmap(...train_step,axis=...)` in the train function
+        grads = jax.lax.pmean(grads, axis_name=pmap_axis)
+    
+    loss = jax.lax.pmean(loss, axis_name=pmap_axis)
+    loss_ema = jax.lax.pmean(compute_loss(state.params_ema), axis_name=pmap_axis)
+
+    
+    metrics = {'loss': loss,
+               'loss_ema': loss_ema,
+               }
+    
+    new_state = state.apply_gradients(grads=grads)
+
+    if dynamic_scale:
+    # if is_fin == False the gradients contain Inf/NaNs and optimizer state and
+    # params should be restored (= skip this step).
+        new_state = new_state.replace(
+            opt_state=jax.tree_map(
+                functools.partial(jnp.where, is_fin),
+                new_state.opt_state,
+                state.opt_state),
+            params=jax.tree_map(
+                functools.partial(jnp.where, is_fin),
+                new_state.params,
+                state.params),
+            dynamic_scale=dynamic_scale)
+        metrics['scale'] = dynamic_scale.scale
+    
+     
+    return new_state, metrics
+
+def unet_valid_loss(rng, state, batch, ddpm_params, loss_fn, pmap_axis='batch'):
+    
+    # run the forward diffusion process to generate noisy image x_t at timestep t
+    x = batch['image']
+    target = batch['mask']
+    
+    assert x.dtype in [jnp.float32, jnp.float64]
+    
+   # create batched timesteps: t with shape (B,)
+    B, H, W, C = x.shape
+  
+    def compute_loss(params):
+        pred = state.apply_fn({'params':params}, x)
+        loss = loss_fn(flatten(pred),flatten(target))
+        loss = jnp.mean(loss, axis= 1)
+        assert loss.shape == (B,)
+        return loss.mean()
+    
+    loss = jax.lax.pmean(compute_loss(state.params), axis_name=pmap_axis)
+    loss_ema = jax.lax.pmean(compute_loss(state.params_ema), axis_name=pmap_axis)
+    
+    metrics = {'loss': loss,
+               'loss_ema': loss_ema,
+               }
+    
+    return metrics
+
+def unet_valid_sample(rng, state, batch, ddpm_params, loss_fn, pmap_axis='batch'):
+    
+    # run the forward diffusion process to generate noisy image x_t at timestep t
+    x = batch['image']
+    target = batch['mask']
+    
+    assert x.dtype in [jnp.float32, jnp.float64]
+    
+   # create batched timesteps: t with shape (B,)
+   
+    B, H, W, C = x.shape
+    
+    def compute_pred(params):
+      pred = state.apply_fn({'params':params}, x)
+      loss = loss_fn(flatten(pred),flatten(target))
+      loss = jnp.mean(loss, axis= 1)
+      assert loss.shape == (B,)
+      return loss.mean(), pred
+      
+    loss, pred = compute_pred(state.params)
+    loss = jax.lax.pmean(loss, axis_name=pmap_axis)
+
+    loss_ema, _ = compute_pred(state.params_ema)
+    loss_ema = jax.lax.pmean(loss_ema, axis_name=pmap_axis)
+    
+    metrics = {'loss': loss,
+               'loss_ema': loss_ema,
+               }
+    
+    return {'image':(x+0.5)/2, 'target':target, 'pred':pred}, metrics
 
 
 
@@ -573,6 +1131,7 @@ def train(config: ml_collections.ConfigDict,
                   wandb.log({
                       "train/step": step, ** summary
                   })
+                  
       
       # Save a checkpoint periodically and generate samples.
       bit_shape = tuple(batch['image'].shape)
@@ -612,6 +1171,380 @@ def train(config: ml_collections.ConfigDict,
 
 
 
+
+
+def train_unet(config: ml_collections.ConfigDict, 
+               workdir: str,
+               wandb_artifact: str = None) -> TrainState:
+  """Execute model training loop.
+
+  Args:
+    config: Hyperparameter configuration for training and evaluation.
+    workdir: Directory where the tensorboard summaries are written to.
+
+  Returns:
+    Final TrainState.
+  """
+  # create writer 
+  writer = metric_writers.create_default_writer(
+  logdir=workdir, just_logging=jax.process_index() != 0)
+  # set up wandb run
+  if config.wandb.log_train and jax.process_index() == 0:
+      wandb_config = utils.to_wandb_config(config)
+      wandb.init(
+            entity=config.wandb.entity,
+            project=config.wandb.project,
+            job_type=config.wandb.job_type,
+            config=wandb_config)
+      # set default x-axis as 'train/step'
+      #wandb.define_metric("*", step_metric="train/step")
+
+  sample_dir = os.path.join(workdir, "samples")
+
+  rng = jax.random.PRNGKey(config.seed)
+
+  tf_rng = tf.random.experimental.create_rng_state(config.seed, 'threefry')
+  
+  rng, d_rng = jax.random.split(rng) 
+  train_iter = format_ds(get_dataset_unet(tf_rng, config))
+
+  valid_iter = get_dataset_unet(tf_rng, config, split_name='test')
+
+  
+  num_steps = config.training.num_train_steps
+  
+  rng, state_rng = jax.random.split(rng)
+  state = create_train_state_unet(state_rng, config)
+  if wandb_artifact is not None:
+      logging.info(f'loading model from wandb: {wandb_artifact}')
+      state = load_wandb_model(state, workdir, wandb_artifact)
+  else:
+      state = restore_checkpoint(state, workdir)
+  # step_offset > 0 if restarting from checkpoint
+  step_offset = int(state.step)
+  state = jax_utils.replicate(state)
+  
+  loss_fn = get_loss_fn(config)
+ 
+  unet_params = utils.get_unet_params(config.unet)
+  ema_decay_fn = create_ema_decay_schedule(config.ema)
+
+  train_step_unet = functools.partial(unet_loss, ddpm_params=unet_params, loss_fn =loss_fn, pmap_axis ='batch')
+  p_train_step = jax.pmap(train_step_unet, axis_name = 'batch')
+
+  valid_step_unet = functools.partial(unet_valid_loss, ddpm_params=unet_params, loss_fn =loss_fn, pmap_axis ='batch')
+  p_valid_step = jax.pmap(valid_step_unet, axis_name = 'batch')
+  
+  valid_sample_unet = functools.partial(unet_valid_sample, ddpm_params=unet_params, loss_fn =loss_fn, pmap_axis ='batch')
+  p_valid_sample = jax.pmap(valid_sample_unet, axis_name = 'batch')
+
+  p_apply_ema = jax.pmap(apply_ema_decay, in_axes=(0, None), axis_name = 'batch')
+  p_copy_params_to_ema = jax.pmap(copy_params_to_ema, axis_name='batch')
+
+  train_metrics = []
+  hooks = []
+  
+  if jax.process_index() == 0:
+      hooks += [periodic_actions.Profile(num_profile_steps=5, logdir=workdir)]
+  train_metrics_last_t = time.time()
+  logging.info('Initial compilation, this might take some minutes...')
+  for step, batch in zip(tqdm(range(step_offset, num_steps)), train_iter):
+      rng, *train_step_rng = jax.random.split(rng, num=jax.local_device_count() + 1)
+      train_step_rng = jnp.asarray(train_step_rng)
+
+      state, metrics = p_train_step(train_step_rng, state, batch)
+
+      
+      for h in hooks:
+          h(step)
+      if step == step_offset:
+          logging.info('Initial compilation completed.')
+          logging.info(f"Number of devices: {batch['image'].shape[0]}")
+          logging.info(f"Batch size per device {batch['image'].shape[1]}")
+          logging.info(f"input shape: {batch['image'].shape[2:]}")
+
+      # update state.params_ema
+      if (step + 1) <= config.ema.update_after_step:
+          state = p_copy_params_to_ema(state)
+      elif (step + 1) % config.ema.update_every == 0:
+          ema_decay = ema_decay_fn(step)
+          logging.info(f'update ema parameters with decay rate {ema_decay}')
+          state =  p_apply_ema(state, ema_decay)
+
+      if config.training.get('log_every_steps'):
+          train_metrics.append(metrics)
+          if (step + 1) % config.training.log_every_steps == 0:
+              train_metrics = common_utils.get_metrics(train_metrics)
+              summary = {
+                    f'train/{k}': v
+                    for k, v in jax.tree_map(lambda x: x.mean(), train_metrics).items()
+                }
+              summary['time/seconds_per_step'] =  (time.time() - train_metrics_last_t) /config.training.log_every_steps
+
+              writer.write_scalars(step + 1, summary)
+              train_metrics = []
+              train_metrics_last_t = time.time()
+
+              if config.wandb.log_train:
+                  wandb.log({
+                      "train/step": step, ** summary
+                  })
+      
+      if (step + 1) % config.training.save_and_sample_every == 0 or step + 1 == num_steps:
+        # Validation
+          valid_metrics = []
+          valid_samples = []
+          for step_v, batch in enumerate(tqdm(format_ds(valid_ds))):
+              rng, *valid_step_rng = jax.random.split(rng, num=jax.local_device_count() + 1)
+              valid_step_rng = jnp.asarray(valid_step_rng)
+              if step_v < config.training.num_sample // config.data.batch_size:
+                v_samples, v_metrics = p_valid_sample(valid_step_rng, state, batch)
+                valid_samples.append(v_samples)
+              else:
+                v_metrics = p_valid_step(valid_step_rng, state, batch)
+              valid_metrics.append(v_metrics)
+          valid_metrics = common_utils.get_metrics(valid_metrics)
+          
+          summary_valid = {
+            f'valid/{k}': v
+            for k, v in jax.tree_map(lambda x: x.mean(), valid_metrics).items()
+          }
+          print(summary_valid)
+          writer.write_scalars(step + 1, summary_valid)
+
+          if config.wandb.log_train:
+            wandb.log({
+              "valid/step": step, ** summary_valid
+            })
+
+          print(len(v_samples['image']), v_samples['image'][0].shape)
+          samples_image = jnp.concatenate([v['image'] for v in valid_samples]) # num_devices, batch, H, W, C
+          samples_target = jnp.concatenate([v['target'] for v in valid_samples]) # num_devices, batch, H, W, C
+          samples_pred = jnp.concatenate([v['pred'] for v in valid_samples]) # num_devices, batch, H, W, C
+
+          print(samples_image.shape)
+          
+          this_sample_dir = os.path.join(sample_dir, f"iter_{step}_host_{jax.process_index()}")
+          tf.io.gfile.makedirs(this_sample_dir)
+          
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, "samples_image.png"), "wb") as fout:
+            samples_array = utils.save_image(samples_image, config.training.num_sample, fout, padding=2)
+            if config.wandb.log_sample:
+                utils.wandb_log_image(samples_array, step+1, name='image')
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, "samples_target.png"), "wb") as fout:
+            samples_array = utils.save_image(samples_target, config.training.num_sample, fout, padding=2)
+            if config.wandb.log_sample:
+                utils.wandb_log_image(samples_array, step+1, name='target')
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, "samples_pred.png"), "wb") as fout:
+            samples_array = utils.save_image(samples_pred, config.training.num_sample, fout, padding=2)
+            if config.wandb.log_sample:
+                utils.wandb_log_image(samples_array, step+1, name='pred')
+
+
+        # generate and save sampling
+          """
+          logging.info(f'generating samples....')
+          samples = []
+          for i in trange(0, config.training.num_sample, config.data.batch_size):
+              rng, sample_rng = jax.random.split(rng)
+              s = sample_loop(sample_rng, state, bit_shape, p_sample_step, config.ddpm.timesteps)
+#              print('s', s.shape)
+              samples.append(p_bits_to_decimal(s))
+#              print('s0', samples[0].shape)
+          samples = jnp.concatenate(samples) # num_devices, batch, H, W, C
+#          print(samples.shape)
+          
+          this_sample_dir = os.path.join(sample_dir, f"iter_{step}_host_{jax.process_index()}")
+          tf.io.gfile.makedirs(this_sample_dir)
+          
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, "sample.png"), "wb") as fout:
+            samples_array = utils.save_image(samples, config.training.num_sample, fout, padding=2)
+            if config.wandb.log_sample:
+                utils.wandb_log_image(samples_array, step+1)
+          # save the chceckpoint
+          """
+          save_checkpoint(state, workdir)
+          if step + 1 == num_steps and config.wandb.log_model:
+              utils.wandb_log_model(workdir, step+1)
+
+  # Wait until computations are done before exiting
+  jax.random.normal(jax.random.PRNGKey(0), ()).block_until_ready()
+
+  return(state)
+
+
+def train_seg(config: ml_collections.ConfigDict, 
+          workdir: str,
+          wandb_artifact: str = None) -> TrainState:
+  """Execute model training loop.
+
+  Args:
+    config: Hyperparameter configuration for training and evaluation.
+    workdir: Directory where the tensorboard summaries are written to.
+
+  Returns:
+    Final TrainState.
+  """
+    # create writer 
+  writer = metric_writers.create_default_writer(
+      logdir=workdir, just_logging=jax.process_index() != 0)
+    # set up wandb run
+  if config.wandb.log_train and jax.process_index() == 0:
+      wandb_config = utils.to_wandb_config(config)
+      wandb.init(
+            entity=config.wandb.entity,
+            project=config.wandb.project,
+            job_type=config.wandb.job_type,
+            config=wandb_config)
+      # set default x-axis as 'train/step'
+      #wandb.define_metric("*", step_metric="train/step")
+
+  sample_dir = os.path.join(workdir, "samples")
+
+  rng = jax.random.PRNGKey(config.seed)
+
+  rng, d_rng = jax.random.split(rng) 
+  train_iter = get_dataset_seg(d_rng, config)
+  valid_iter = get_dataset_seg(d_rng, config, split_name='test')
+  
+  num_steps = config.training.num_train_steps
+  
+  rng, state_rng = jax.random.split(rng)
+  state = create_train_state_seg(state_rng, config)
+  if wandb_artifact is not None:
+      logging.info(f'loading model from wandb: {wandb_artifact}')
+      state = load_wandb_model(state, workdir, wandb_artifact)
+  else:
+      state = restore_checkpoint(state, workdir)
+  # step_offset > 0 if restarting from checkpoint
+  step_offset = int(state.step)
+  state = jax_utils.replicate(state)
+  
+  loss_fn = get_loss_fn(config)
+ 
+  ddpm_params = utils.get_ddpm_params(config.ddpm)
+  ema_decay_fn = create_ema_decay_schedule(config.ema)
+  
+  train_step = functools.partial(seg_loss, ddpm_params=ddpm_params, loss_fn =loss_fn, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0, pmap_axis ='batch')
+  p_train_step = jax.pmap(train_step, axis_name = 'batch')
+  p_apply_ema = jax.pmap(apply_ema_decay, in_axes=(0, None), axis_name = 'batch')
+  p_copy_params_to_ema = jax.pmap(copy_params_to_ema, axis_name='batch')
+  p_bits_to_decimal = jax.pmap(bits_to_decimal, axis_name = 'batch')
+
+  train_metrics = []
+  hooks = []
+
+  sample_step = functools.partial(seg_sample_step, bit_scale=config.model.bit_scale, ddpm_params=ddpm_params, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0)
+  p_sample_step = jax.pmap(sample_step, axis_name='batch')
+
+  
+  if jax.process_index() == 0:
+      hooks += [periodic_actions.Profile(num_profile_steps=5, logdir=workdir)]
+  train_metrics_last_t = time.time()
+  logging.info('Initial compilation, this might take some minutes...')
+  for step, batch in zip(tqdm(range(step_offset, num_steps)), train_iter):
+      rng, *train_step_rng = jax.random.split(rng, num=jax.local_device_count() + 1)
+      train_step_rng = jnp.asarray(train_step_rng)
+
+      state, metrics = p_train_step(train_step_rng, state, batch)
+
+#      print(metrics)
+      
+      for h in hooks:
+          h(step)
+      if step == step_offset:
+          logging.info('Initial compilation completed.')
+          logging.info(f"Number of devices: {batch['image'].shape[0]}")
+          logging.info(f"Batch size per device {batch['image'].shape[1]}")
+          logging.info(f"input shape: {batch['image'].shape[2:]}")
+
+      # update state.params_ema
+      if (step + 1) <= config.ema.update_after_step:
+          state = p_copy_params_to_ema(state)
+      elif (step + 1) % config.ema.update_every == 0:
+          ema_decay = ema_decay_fn(step)
+          logging.info(f'update ema parameters with decay rate {ema_decay}')
+          state =  p_apply_ema(state, ema_decay)
+
+      if config.training.get('log_every_steps'):
+          train_metrics.append(metrics)
+          if (step + 1) % config.training.log_every_steps == 0:
+              train_metrics = common_utils.get_metrics(train_metrics)
+              summary = {
+                    f'train/{k}': v
+                    for k, v in jax.tree_map(lambda x: x.mean(), train_metrics).items()
+                }
+              summary['time/seconds_per_step'] =  (time.time() - train_metrics_last_t) /config.training.log_every_steps
+
+              writer.write_scalars(step + 1, summary)
+              train_metrics = []
+              train_metrics_last_t = time.time()
+
+              if config.wandb.log_train:
+                  wandb.log({
+                      "train/step": step, ** summary
+                  })
+                  
+      
+      # Save a checkpoint periodically and generate samples.
+      bit_shape = tuple(batch['image'].shape)
+#      print('bit shape', bit_shape)
+      
+      if (step + 1) % config.training.save_and_sample_every == 0 or step + 1 == num_steps:
+          # generate and save sampling 
+          logging.info(f'generating samples....')
+          samples_pred = []
+          samples_image = []
+          samples_target = []
+          
+          for i in trange(0, config.training.num_sample, config.data.batch_size):
+              batch = next(valid_iter)
+              rng, sample_rng = jax.random.split(rng)
+              s = sample_loop_seg(sample_rng, state, batch, p_sample_step, config.ddpm.timesteps)
+#              print('s', s.shape)
+              samples_pred.append(p_bits_to_decimal(s))
+              samples_target.append(p_bits_to_decimal(batch['mask']))
+              samples_image.append(0.5*(batch['image']+1))
+              
+              #              print('s0', samples[0].shape)
+          samples_pred = jnp.concatenate(samples_pred) # num_devices, batch, H, W, C
+          samples_target = jnp.concatenate(samples_target) # num_devices, batch, H, W, C
+          samples_image = jnp.concatenate(samples_image) # num_devices, batch, H, W, C
+          
+#          print(samples.shape)
+          
+          this_sample_dir = os.path.join(sample_dir, f"iter_{step}_host_{jax.process_index()}")
+          tf.io.gfile.makedirs(this_sample_dir)
+          
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, "samples_image.png"), "wb") as fout:
+            samples_array = utils.save_image(samples_image, config.training.num_sample, fout, padding=2)
+            if config.wandb.log_sample:
+                utils.wandb_log_image(samples_array, step+1, name='image')
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, "samples_target.png"), "wb") as fout:
+            samples_array = utils.save_image(samples_target, config.training.num_sample, fout, padding=2)
+            if config.wandb.log_sample:
+                utils.wandb_log_image(samples_array, step+1, name='target')
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, "samples_pred.png"), "wb") as fout:
+            samples_array = utils.save_image(samples_pred, config.training.num_sample, fout, padding=2)
+            if config.wandb.log_sample:
+                utils.wandb_log_image(samples_array, step+1, name='pred')
+
+          # save the chceckpoint
+          save_checkpoint(state, workdir)
+          if step + 1 == num_steps and config.wandb.log_model:
+              utils.wandb_log_model(workdir, step+1)
+
+  # Wait until computations are done before exiting
+  jax.random.normal(jax.random.PRNGKey(0), ()).block_until_ready()
+
+  return(state)
 
 
 

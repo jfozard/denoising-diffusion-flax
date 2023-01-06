@@ -1,20 +1,17 @@
 """Main file for running denoising-diffusion-flax.
 """
 
-#import scipy.optimize
+import scipy.optimize
 
-import flax
-
-import train, sampling
-
-import jax
 from absl import app
 from absl import flags
 from absl import logging
 from clu import platform
+import jax
 from ml_collections import config_flags
 
 
+import train, sampling
 
 import tensorflow as tf
 
@@ -43,7 +40,7 @@ def main(argv):
 
 
   if FLAGS.mode == "train":
-      train.train(FLAGS.config, FLAGS.workdir, FLAGS.wandb_artifact)
+      train.train_unet(FLAGS.config, FLAGS.workdir, FLAGS.wandb_artifact)
   else:
       raise ValueError(f"Mode {FLAGS.mode} not recognized.")
 

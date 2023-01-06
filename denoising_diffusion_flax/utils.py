@@ -1,4 +1,3 @@
-
 import jax.numpy as jnp
 import numpy as np
 import jax 
@@ -59,6 +58,9 @@ def get_ddpm_params(config):
   }
 
 
+def get_unet_params(config):
+    return {}
+
 
 def make_grid(samples, n_samples, padding=2, pad_value=0.0):
 
@@ -111,7 +113,7 @@ def save_image(samples, n_samples, fp, padding=2, pad_value=0.0, format=None):
       filename extension. If a file object was used instead of a filename, this
       parameter should always be used.
   """
-
+  print('save_image_shape', samples.shape)
   grid = make_grid(samples, n_samples, padding, pad_value)
   # Add 0.5 after unnormalizing to [0, 255] to round to nearest integer
   ndarr = jnp.clip(grid * 255.0 + 0.5, 0, 255).astype(jnp.uint8)
@@ -121,9 +123,9 @@ def save_image(samples, n_samples, fp, padding=2, pad_value=0.0, format=None):
 
   return ndarr
 
-def wandb_log_image(samples_array, step):
-    sample_images = wandb.Image(samples_array, caption = f"step {step}")
-    wandb.log({'samples':sample_images })
+def wandb_log_image(samples_array, step, name='samples'):
+    sample_images = wandb.Image(samples_array, caption = f"{name} step {step}")
+    wandb.log({name:sample_images })
 
 def wandb_log_model(workdir, step):
     artifact = wandb.Artifact(name=f"model-{wandb.run.id}", type="ddpm_model")

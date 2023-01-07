@@ -8,7 +8,7 @@ def get_config():
   # wandb
   config.wandb = wandb = ml_collections.ConfigDict()
   wandb.entity = None
-  wandb.project = "ddpm-bit-2"
+  wandb.project = "seg-leaf"
   wandb.job_type = "training"
   wandb.name = None 
   wandb.log_train = True
@@ -19,7 +19,7 @@ def get_config():
   # training
   config.training = training = ml_collections.ConfigDict()
   training.num_train_steps = 700000
-  training.log_every_steps = 100
+  training.log_every_steps = 1000
   training.loss_type = 'l2'
   training.half_precision = False
   training.save_and_sample_every = 100
@@ -52,7 +52,7 @@ def get_config():
   data.batch_size = 64
   data.cache = False
   data.image_size = 64
-  data.channels = 1*8
+  data.channels = 1*12
 
 
   # model
@@ -62,6 +62,7 @@ def get_config():
   model.simple = False
   model.bit_scale = 0.1
   model.full_attn_at_top = True
+  model.bits = 12
   
   # optim
   config.optim = optim = ml_collections.ConfigDict()

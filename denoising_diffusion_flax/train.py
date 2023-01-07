@@ -57,7 +57,8 @@ def normalize_to_neg_one_to_one(img):
 def decimal_to_bits(x, bits = 8):
     """ expects image tensor ranging from 0 to 1, outputs bit tensor ranging from -1 to 1 """
 
-    x = np.clip((x * 255 + 0.5).astype(np.int16), 0, 255)
+    r = 2**bits - 1
+    x = np.clip((x * r + 0.5).astype(np.int16), 0, r)
 #    print('dtb', x)
     
     mask = 2 ** np.arange(bits - 1, -1, -1)
@@ -72,15 +73,33 @@ def decimal_to_bits(x, bits = 8):
 def bits_to_decimal(x, bits = 8):
     """ expects bits from -1 to 1, outputs image tensor from 0 to 1 """
 
+    r = 2**bits - 1
+    
     x = (x > 0).astype(np.int16)
 #    print('btd', x)
     mask = 2 ** np.arange(bits - 1, -1, -1)
 
     mask = rearrange(mask, 'd -> 1 1 1 1 d')
-    x = rearrange(x, 'b h w (c d) -> b h w c d', d = 8)
+    x = rearrange(x, 'b h w (c d) -> b h w c d', d = bits)
     dec = reduce(x * mask, 'b h w c d -> b h w c', 'sum')
-    return np.clip((dec)/ 255, 0., 1.)
+    return np.clip((dec)/ r, 0., 1.)
 
+def bits_to_img(x, cmap, bits = 8):
+    """ expects bits from -1 to 1, outputs image tensor from 0 to 1 """
+
+    r = 2**bits - 1
+    
+    x = (x > 0).astype(np.int16)
+#    print('btd', x)
+    mask = 2 ** np.arange(bits - 1, -1, -1)
+
+    mask = rearrange(mask, 'd -> 1 1 1 1 d')
+    x = rearrange(x, 'b h w (c d) -> b h w c d', d = bits)
+    dec = reduce(x * mask, 'b h w c d -> b h w c', 'sum')
+    col = cmap[dec.astype(np.uint16)[...,0], :]
+    return col
+
+  
 def boundary(x):
 
 #    print(x.shape)
@@ -128,12 +147,13 @@ def crop_random(image, resolution):
   return tf.cast(image, tf.uint8)
                                
 
-def convert_labels(image, resolution):
+def convert_labels(image, resolution, bits):
     s = resolution
     print(image, s)
+    n = 2**bits
     a = tf.image.random_crop(image, (s, s, 1))
     u, aa = tf.unique(tf.reshape(a, [-1])) #jnp.unique(a._numpy(), return_inverse=True)
-    b = tf.random.shuffle(tf.tile(tf.range(255),[1+aa.shape[0]//256]))[:aa.shape[0]] #jnp.array(sample(jnp.range(256)/255.0, len(u)))
+    b = tf.random.shuffle(tf.tile(tf.range(m-1),[1+aa.shape[0]//n]))[:aa.shape[0]] #jnp.array(sample(jnp.range(256)/255.0, len(u)))
     r = tf.reshape(tf.gather(b,aa), a.shape) 
     return tf.cast(r, tf.uint8)
 
@@ -182,7 +202,7 @@ def get_dataset(rng, config):
 
     def preprocess_fn(d):
         img = d['mask']
-        img = convert_labels(img, config.data.image_size)
+        img = convert_labels(img, config.data.image_size, config.data.bits)
         img = tf.image.random_flip_left_right(img)
         img = tf.image.random_flip_up_down(img)
         img= tf.image.convert_image_dtype(img, input_dtype)
@@ -216,7 +236,7 @@ def get_dataset(rng, config):
            # Use _numpy() for zero-copy conversion between TF and NumPy.
            x = x._numpy()  # pylint: disable=protected-access
            # normalize to [-1,1]
-           x = decimal_to_bits(x)*config.model.bit_scale
+           x = decimal_to_bits(x, bits=config.model.bits)*config.model.bit_scale
            #x = normalize_to_neg_one_to_one(x)
           # reshape (batch_size, height, width, channels) to
          # (local_devices, device_batch_size, height, width, 3)
@@ -383,7 +403,7 @@ def get_dataset_seg(rng, config, split_name='train'):
            return x.reshape((local_device_count, -1) + x.shape[1:])
 
         xs = {'image': normalize_to_neg_one_to_one(xs['image'])._numpy(),
-              'mask': decimal_to_bits(xs['mask']._numpy())*config.model.bit_scale }
+              'mask': decimal_to_bits(xs['mask']._numpy(), bits=config.model.bits)*config.model.bit_scale }
 
          
         return jax.tree_map(_scale_and_reshape, xs)
@@ -1077,7 +1097,7 @@ def train(config: ml_collections.ConfigDict,
   p_train_step = jax.pmap(train_step, axis_name = 'batch')
   p_apply_ema = jax.pmap(apply_ema_decay, in_axes=(0, None), axis_name = 'batch')
   p_copy_params_to_ema = jax.pmap(copy_params_to_ema, axis_name='batch')
-  p_bits_to_decimal = jax.pmap(bits_to_decimal, axis_name = 'batch')
+  p_bits_to_decimal = jax.pmap(functools.partial(bits_to_decimal, bits=config.model.bits), axis_name = 'batch')
 
   train_metrics = []
   hooks = []
@@ -1145,7 +1165,7 @@ def train(config: ml_collections.ConfigDict,
               rng, sample_rng = jax.random.split(rng)
               s = sample_loop(sample_rng, state, bit_shape, p_sample_step, config.ddpm.timesteps)
 #              print('s', s.shape)
-              samples.append(p_bits_to_decimal(s))
+              samples.append(p_bits_to_decimal(s, bits=config.model.bits))
 #              print('s0', samples[0].shape)
           samples = jnp.concatenate(samples) # num_devices, batch, H, W, C
 #          print(samples.shape)
@@ -1407,6 +1427,9 @@ def train_seg(config: ml_collections.ConfigDict,
 
   rng = jax.random.PRNGKey(config.seed)
 
+  print((2**config.model.bits,3))
+  cmap = jax.random.uniform(rng, shape=(2**config.model.bits,3))
+  
   rng, d_rng = jax.random.split(rng) 
   train_iter = get_dataset_seg(d_rng, config)
   valid_iter = get_dataset_seg(d_rng, config, split_name='test')
@@ -1433,7 +1456,7 @@ def train_seg(config: ml_collections.ConfigDict,
   p_train_step = jax.pmap(train_step, axis_name = 'batch')
   p_apply_ema = jax.pmap(apply_ema_decay, in_axes=(0, None), axis_name = 'batch')
   p_copy_params_to_ema = jax.pmap(copy_params_to_ema, axis_name='batch')
-  p_bits_to_decimal = jax.pmap(bits_to_decimal, axis_name = 'batch')
+  p_bits_to_img = jax.pmap(functools.partial(bits_to_img, cmap=cmap, bits=config.model.bits), axis_name = 'batch')
 
   train_metrics = []
   hooks = []
@@ -1506,18 +1529,20 @@ def train_seg(config: ml_collections.ConfigDict,
               rng, sample_rng = jax.random.split(rng)
               s = sample_loop_seg(sample_rng, state, batch, p_sample_step, config.ddpm.timesteps)
 #              print('s', s.shape)
-              samples_pred.append(p_bits_to_decimal(s))
-              samples_target.append(p_bits_to_decimal(batch['mask']))
-              samples_image.append(0.5*(batch['image']+1))
+              samples_pred.append(p_bits_to_img(s))
+              samples_target.append(p_bits_to_img(batch['mask']))
+              samples_image.append(jnp.repeat(0.5*(batch['image']+1), 3, axis=-1))
               
               #              print('s0', samples[0].shape)
           samples_pred = jnp.concatenate(samples_pred) # num_devices, batch, H, W, C
           samples_target = jnp.concatenate(samples_target) # num_devices, batch, H, W, C
           samples_image = jnp.concatenate(samples_image) # num_devices, batch, H, W, C
 
+          print(samples_pred.shape, samples_target.shape, samples_image.shape)
+          
           samples_all = jnp.stack((samples_pred, samples_target, samples_image), axis=2)
           
-#          print(samples.shape)
+          print('sa.shape', samples_all.shape)
           
           this_sample_dir = os.path.join(sample_dir, f"iter_{step}_host_{jax.process_index()}")
           tf.io.gfile.makedirs(this_sample_dir)

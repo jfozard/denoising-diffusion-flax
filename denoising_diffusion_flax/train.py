@@ -28,6 +28,8 @@ import jax.numpy as jnp
 import numpy as np
 import jax 
 
+from jax.numpy.fft import fft2, ifft2
+
 import ml_collections
 import tensorflow as tf
 import tensorflow_datasets as tfds
@@ -634,31 +636,20 @@ def create_ema_decay_schedule(config):
 
 def q_sample(x, t, noise, ddpm_params):
 
-    sqrt_alpha_bar = ddpm_params['sqrt_alphas_bar'][t, None, None, None]
-    sqrt_1m_alpha_bar = ddpm_params['sqrt_1m_alphas_bar'][t,None,None,None]
+    sqrt_alpha_bar = ddpm_params['sqrt_alphas_bar'][t,:,:,None]
+    sqrt_1m_alpha_bar = ddpm_params['sqrt_1m_alphas_bar'][t,:,:,None]
+
+    x = fft2(x, axes=(-3,-2))
+    noise = fft2(noise, axes=(-3,-2))
+
     x_t = sqrt_alpha_bar * x + sqrt_1m_alpha_bar * noise
 
-    return x_t
+    return ifft2(x_t, axes=(-3,-2)).real
 
 def log(t, eps = 1e-20):
     return jnp.log(jnp.maximum(t, eps))
 
 
-
-def right_pad_dims_to(x, t):
-    padding_dims = x.ndim - t.ndim
-    if padding_dims <= 0:
-        return t
-    return t.reshape(*t.shape, *((1,) * padding_dims))
-
-def beta_linear_log_snr(t):
-    return -jnp.log(jnp.expm1(1e-4 + 10 * (t ** 2)))
-
-def alpha_cosine_log_snr(t, s: float = 0.008):
-    return -log((jnp.cos((t + s) / (1 + s) * math.pi * 0.5) ** -2) - 1, eps = 1e-5) # not sure if this accounts for beta being clipped to 0.999 in discrete version
-
-def log_snr_to_alpha_sigma(log_snr):
-    return jnp.sqrt(jax.nn.sigmoid(log_snr)), jnp.sqrt(jax.nn.sigmoid(-log_snr))
 
 def model_predict2(state, x, x0, y, t, ddpm_params, self_condition, is_pred_x0, use_ema=True):
     if use_ema:
@@ -691,9 +682,14 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
     # sample a noise (input for q_sample)
     rng, noise_rng = jax.random.split(rng)
     noise = jax.random.normal(noise_rng, x.shape)
+#    x, y = np.ogrid[:noise.shape[-3],:noise.shape[-2]]
+#    r = jnp.sqrt(x**2+y**2+1)
+#    noise = ifft2(fft2(noise, axes=(-3,-2))*jnp.exp(-jnp.exp(-4)*(r-10)**2), axes=(-3,-2))
+    
     # if is_pred_x0 == True, the target for loss calculation is x, else noise
     target = x if is_pred_x0 else noise
- 
+    # Only working for pred_x0
+    
     #noise_level = alpha_cosine_log_snr(batched_t)
 
     #padded_noise_level = right_pad_dims_to(x, noise_level)

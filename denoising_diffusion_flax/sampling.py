@@ -151,7 +151,7 @@ def sample_loop_seg(rng, state, batch, p_sample_step, timesteps):
     # generate the initial sample (pure noise)
     x = batch['mask']
     y = batch['image']
-#    x = jax.random.normal(x_rng, shape)
+    x = jax.random.normal(x_rng, x.shape)
     x0 = jnp.zeros_like(x) # initialize x0 for self-conditioning
     # sample step
     for t in reversed(jnp.arange(timesteps)):

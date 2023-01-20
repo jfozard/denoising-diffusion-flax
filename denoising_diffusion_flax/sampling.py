@@ -7,6 +7,20 @@ from jax.numpy.fft import fft2, ifft2
 def unnormalize_to_zero_to_one(t):
     return (t + 1) * 0.5
 
+def noise_to_x0(noise, xt, batched_t, ddpm):
+    assert batched_t.shape[0] == xt.shape[0] == noise.shape[0] # make sure all has batch dimension
+    sqrt_alpha_bar = ddpm['sqrt_alphas_bar'][batched_t, :, :, None]
+    alpha_bar= ddpm['alphas_bar'][batched_t, None, None, None]
+    x0 = 1. / sqrt_alpha_bar * xt -  jnp.sqrt(1./alpha_bar-1) * noise
+    return x0
+
+
+def x0_to_noise(x0, xt, batched_t, ddpm):
+    assert batched_t.shape[0] == xt.shape[0] == x0.shape[0] # make sure all has batch dimension
+    sqrt_alpha_bar = ddpm['sqrt_alphas_bar'][batched_t, :, :, None]
+    alpha_bar= ddpm['alphas_bar'][batched_t, :, :, None]
+    noise = (1. / sqrt_alpha_bar * xt - x0) /jnp.sqrt(1./alpha_bar-1)
+    return noise
 
 def noise_fft_to_x0_fft(noise_fft, xt_fft, batched_t, ddpm):
     assert batched_t.shape[0] == xt_fft.shape[0] == noise_fft.shape[0] # make sure all has batch dimension
@@ -66,6 +80,35 @@ def model_predict(state, x, x0, t, ddpm_params, self_condition, is_pred_x0, use_
 
 
 # called by p_loss and ddpm_sample_step - both use pmap
+def seg_model_predict_fft(state, x, x_fft, x_p, y, t, ddpm_params, self_condition, is_pred_x0, use_ema=True):
+    if use_ema:
+        variables = {'params': state.params_ema}
+    else:
+        variables = {'params': state.params}
+    
+    if self_condition:
+        pred = state.apply_fn(variables, jnp.concatenate([x, x_p, y],axis=-1), t)
+    else:
+        pred = state.apply_fn(variables, jnp.concatenate([x, y],axis=-1), t)
+
+        
+    if is_pred_x0: # if the objective is is_pred_x0, pred == x0_pred
+        x0_pred = pred
+
+        x0_pred_fft = fft2(pred)        
+        noise_pred_fft =  x0_fft_to_noise_fft(x0_pred_fft, x_fft, t, ddpm_params)
+        noise_pred = ifft2(noise_pred_fft).real
+    else:
+        noise_pred = pred
+        noise_pred_fft = fft2(pred)
+        x0_pred_fft = noise_fft_to_x0_fft(noise_pred_fft, x_fft, t, ddpm_params)
+        x0_pred = ifft2(x0_pred_fft).real
+    
+    return x0_pred, x0_pred_fft, noise_pred, noise_pred_fft
+#    return x0_pred, None, noise_pred, None
+
+
+# called by p_loss and ddpm_sample_step - both use pmap
 def seg_model_predict(state, x, x_fft, x_p, y, t, ddpm_params, self_condition, is_pred_x0, use_ema=True):
     if use_ema:
         variables = {'params': state.params_ema}
@@ -80,16 +123,13 @@ def seg_model_predict(state, x, x_fft, x_p, y, t, ddpm_params, self_condition, i
         
     if is_pred_x0: # if the objective is is_pred_x0, pred == x0_pred
         x0_pred = pred
-        x0_pred_fft = fft2(pred)        
-        noise_pred_fft =  x0_fft_to_noise_fft(x0_pred_fft, x_fft, t, ddpm_params)
-        noise_pred = ifft2(noise_pred_fft).real
+        noise_pred =  x0_to_noise(pred, x, t, ddpm_params)
+
     else:
         noise_pred = pred
-        noise_pred_fft = fft2(pred)
-        x0_pred_fft = noise_fft_to_x0_fft(noise_pred_fft, x_fft, t, ddpm_params)
-        x0_pred = ifft2(x0_pred_fft).real
-    
-    return x0_pred, x0_pred_fft, noise_pred, noise_pred_fft
+        x0_pred = noise_to_x0(pred, x, t, ddpm_params)
+
+    return x0_pred, None, noise_pred, None
 
 
 def ddpm_sample_step(state, rng, x, t, x0_last, bit_scale, ddpm_params, self_condition=False, is_pred_x0=False):
@@ -110,6 +150,63 @@ def ddpm_sample_step(state, rng, x, t, x0_last, bit_scale, ddpm_params, self_con
 
     return x, x0
 
+def seg_sample_step(state, rng, x, x_fft, y, t, x0_last, bit_scale, ddpm_params, self_condition=False, is_pred_x0=False, use_fft=True):
+
+    print(bit_scale, x.shape, x0_last.shape) 
+    batched_t = jnp.ones((x.shape[0],), dtype=jnp.int32) * t
+
+    if use_fft:
+        seg_predict = seg_model_predict_fft
+    else:
+        seg_predict = seg_model_predict
+    
+    if self_condition:
+        x0, x0_fft, eps, eps_fft = seg_predict(state, x, x_fft, x0_last, y, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=True) 
+    else:
+        x0, x0_fft, eps, eps_fft = seg_predict(state, x, x_fft, None, y, batched_t,ddpm_params, self_condition, is_pred_x0, use_ema=True)
+    
+    # make sure x0 between [-1,1]
+    if not use_fft:
+        x0 = jnp.clip(x0, -bit_scale, bit_scale)
+
+#    posterior_mean, posterior_log_variance = get_posterior_mean_variance(x, t, x0, v, ddpm_params)
+
+    beta = ddpm_params['betas'][t, :, :, None]
+    alpha = ddpm_params['alphas'][t, :, :, None]
+    alpha_bar = ddpm_params['alphas_bar'][t, :, :, None]
+    alpha_bar_last = ddpm_params['alphas_bar'][t-1, :, :, None]
+    sqrt_alpha_bar_last = ddpm_params['sqrt_alphas_bar'][t-1, :, :, None]
+
+    if use_fft:
+    # only needed when t > 0
+        coef_x0 = beta * sqrt_alpha_bar_last / (1. - alpha_bar)
+        coef_xt = (1. - alpha_bar_last) * jnp.sqrt(alpha) / ( 1- alpha_bar)        
+        posterior_mean_fft = coef_x0 * x0_fft + coef_xt * x_fft
+        posterior_mean = coef_x0 * x0 + coef_xt * x
+        
+        posterior_variance = beta * (1 - alpha_bar_last) / (1. - alpha_bar)
+        posterior_log_variance = jnp.log(jnp.clip(posterior_variance, a_min = 1e-20))
+
+        x_fft = posterior_mean_fft + jnp.exp(0.5 *  posterior_log_variance) * jax.random.normal(rng, x.shape) # ?
+        x = ifft2(x_fft).real
+    else:
+        coef_x0 = beta * sqrt_alpha_bar_last / (1. - alpha_bar)
+        coef_xt = (1. - alpha_bar_last) * jnp.sqrt(alpha) / ( 1- alpha_bar)        
+        posterior_mean = coef_x0 * x0 + coef_xt * x
+        
+        posterior_variance = beta * (1 - alpha_bar_last) / (1. - alpha_bar)
+        posterior_log_variance = jnp.log(jnp.clip(posterior_variance, a_min = 1e-20))
+
+        x = posterior_mean + jnp.exp(0.5 *  posterior_log_variance) * jax.random.normal(rng, x.shape) # ?
+
+        x_fft = None
+    
+    #x = posterior_mean + jnp.exp(0.5 *  posterior_log_variance) * jax.random.normal(rng, x.shape) # ?
+    
+    return x, x_fft, x0
+
+
+"""
 def seg_sample_step(state, rng, x, x_fft, y, t, x0_last, bit_scale, ddpm_params, self_condition=False, is_pred_x0=False):
 
     print(bit_scale, x.shape, x0_last.shape) 
@@ -134,16 +231,15 @@ def seg_sample_step(state, rng, x, x_fft, y, t, x0_last, bit_scale, ddpm_params,
     # only needed when t > 0
     coef_x0 = beta * sqrt_alpha_bar_last / (1. - alpha_bar)
     coef_xt = (1. - alpha_bar_last) * jnp.sqrt(alpha) / ( 1- alpha_bar)        
-    posterior_mean_fft = coef_x0 * x0_fft + coef_xt * x_fft
+    posterior_mean = coef_x0 * x0 + coef_xt * x
         
     posterior_variance = beta * (1 - alpha_bar_last) / (1. - alpha_bar)
     posterior_log_variance = jnp.log(jnp.clip(posterior_variance, a_min = 1e-20))
 
-    x_fft = posterior_mean_fft + jnp.exp(0.5 *  posterior_log_variance) * jax.random.normal(rng, x.shape) # ?
-    x = ifft2(x_fft).real
+    x = posterior_mean + jnp.exp(0.5 *  posterior_log_variance) * jax.random.normal(rng, x.shape) # ?
     
-    return x, x_fft, x0
-
+    return x, None, x0
+"""
 
 def sample_loop(rng, state, shape, p_sample_step, timesteps):
     

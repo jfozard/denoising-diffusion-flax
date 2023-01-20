@@ -15,8 +15,8 @@ def cosine_beta_schedule(timesteps):
     ts = jnp.linspace(0, 1, timesteps + 1)[:,None,None]
     x, y = jnp.ogrid[:64,:64]
     r = jnp.sqrt(x**2+y**2+1)[None,:,:]
-    p = jnp.maximum(jnp.minimum(1, (r-20)**2/200), 1)
-    alphas_bar = (jnp.cos((ts + s) / (1 + s) * jnp.pi /2) ** (2*p)) #[:,None,None]
+    p = 0.0*r+1.0 #jnp.maximum(jnp.minimum(1.0, (r-20)**2/200), 1.0)
+    alphas_bar = p*(jnp.cos(((ts + s) / (1 + s)) * jnp.pi /2) ** (2)) #[:,None,None]
     alphas_bar = alphas_bar/alphas_bar[0]
     betas = 1 - (alphas_bar[1:] / alphas_bar[:-1])
     return(jnp.clip(betas, 0, max_beta))
@@ -51,6 +51,8 @@ def get_ddpm_params(config):
     p2_loss_weight=  (p2_loss_weight_k + alphas_bar / (1 - alphas_bar)) ** -p2_loss_weight_gamma
 
 
+    print(sqrt_alphas_bar)
+    
     return {
       'betas': betas,
       'alphas': alphas,

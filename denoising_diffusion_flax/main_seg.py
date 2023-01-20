@@ -44,6 +44,8 @@ def main(argv):
 
   if FLAGS.mode == "train":
       train.train_seg(FLAGS.config, FLAGS.workdir, FLAGS.wandb_artifact)
+  elif FLAGS.mode=="sample":
+      train.sample_seg(FLAGS.config, FLAGS.workdir, FLAGS.wandb_artifact)
   else:
       raise ValueError(f"Mode {FLAGS.mode} not recognized.")
 

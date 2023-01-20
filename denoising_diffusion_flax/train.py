@@ -638,14 +638,15 @@ def q_sample(x, t, noise, ddpm_params):
 
     sqrt_alpha_bar = ddpm_params['sqrt_alphas_bar'][t,:,:,None]
     sqrt_1m_alpha_bar = ddpm_params['sqrt_1m_alphas_bar'][t,:,:,None]
-
+    
     x = fft2(x, axes=(-3,-2))
     noise = fft2(noise, axes=(-3,-2))
 
     x_t = sqrt_alpha_bar * x + sqrt_1m_alpha_bar * noise
 
     return ifft2(x_t, axes=(-3,-2)).real
-
+    #return x_t
+    
 def log(t, eps = 1e-20):
     return jnp.log(jnp.maximum(t, eps))
 
@@ -1514,6 +1515,120 @@ def train_seg(config: ml_collections.ConfigDict,
 #      print('bit shape', bit_shape)
       
       if (step + 1) % config.training.save_and_sample_every == 0 or step + 1 == num_steps:
+          # generate and save sampling 
+          logging.info(f'generating samples....')
+          samples_pred = []
+          samples_image = []
+          samples_target = []
+          
+          for i in trange(0, config.training.num_sample, config.data.batch_size):
+              batch = next(valid_iter)
+              rng, sample_rng = jax.random.split(rng)
+              s = sample_loop_seg(sample_rng, state, batch, p_sample_step, config.ddpm.timesteps)
+#              print('s', s.shape)
+              samples_pred.append(p_bits_to_img(s))
+              samples_target.append(p_bits_to_img(batch['mask']))
+              samples_image.append(jnp.repeat(0.5*(batch['image']+1), 3, axis=-1))
+              
+              #              print('s0', samples[0].shape)
+          samples_pred = jnp.concatenate(samples_pred) # num_devices, batch, H, W, C
+          samples_target = jnp.concatenate(samples_target) # num_devices, batch, H, W, C
+          samples_image = jnp.concatenate(samples_image) # num_devices, batch, H, W, C
+
+          print(samples_pred.shape, samples_target.shape, samples_image.shape)
+          
+          samples_all = jnp.stack((samples_pred, samples_target, samples_image), axis=2)
+          
+          print('sa.shape', samples_all.shape)
+          
+          this_sample_dir = os.path.join(sample_dir, f"iter_{step}_host_{jax.process_index()}")
+          tf.io.gfile.makedirs(this_sample_dir)
+
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, "samples_all.png"), "wb") as fout:
+            samples_array = utils.save_image_all(samples_pred, samples_target, samples_image, config.training.num_sample, fout, padding=2)
+            if config.wandb.log_sample:
+                utils.wandb_log_image(samples_array, step+1, name='all')
+
+          
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, "samples_image.png"), "wb") as fout:
+            samples_array = utils.save_image(samples_image, config.training.num_sample, fout, padding=2)
+            if config.wandb.log_sample:
+                utils.wandb_log_image(samples_array, step+1, name='image')
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, "samples_target.png"), "wb") as fout:
+            samples_array = utils.save_image(samples_target, config.training.num_sample, fout, padding=2)
+            if config.wandb.log_sample:
+                utils.wandb_log_image(samples_array, step+1, name='target')
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, "samples_pred.png"), "wb") as fout:
+            samples_array = utils.save_image(samples_pred, config.training.num_sample, fout, padding=2)
+            if config.wandb.log_sample:
+                utils.wandb_log_image(samples_array, step+1, name='pred')
+
+          # save the chceckpoint
+          save_checkpoint(state, workdir)
+          if step + 1 == num_steps and config.wandb.log_model:
+              utils.wandb_log_model(workdir, step+1)
+
+  # Wait until computations are done before exiting
+  jax.random.normal(jax.random.PRNGKey(0), ()).block_until_ready()
+
+  return(state)
+
+
+
+def sample_seg(config: ml_collections.ConfigDict, 
+          workdir: str,
+          wandb_artifact: str = None) -> None:
+  """Execute model training loop.
+
+  Args:
+    config: Hyperparameter configuration for training and evaluation.
+    workdir: Directory where the tensorboard summaries are written to.
+
+  Returns:
+    Final TrainState.
+  """
+    # create writer 
+
+  sample_dir = os.path.join(workdir, "new_samples")
+
+  rng = jax.random.PRNGKey(config.seed)
+
+  cmap = jax.random.uniform(rng, shape=(2**config.model.bits,3))
+  
+  rng, d_rng = jax.random.split(rng) 
+  valid_iter = get_dataset_seg(d_rng, config, split_name='test')
+  
+  num_steps = config.training.num_train_steps
+  
+  rng, state_rng = jax.random.split(rng)
+
+  state = create_train_state_seg(state_rng, config)
+  state = restore_checkpoint(state, workdir)
+
+  # step_offset > 0 if restarting from checkpoint
+  step_offset = int(state.step)
+  state = jax_utils.replicate(state)
+  
+  loss_fn = get_loss_fn(config)
+ 
+  ddpm_params = utils.get_ddpm_params(config.ddpm)
+  ema_decay_fn = create_ema_decay_schedule(config.ema)
+  
+  p_bits_to_img = jax.pmap(functools.partial(bits_to_img, cmap=cmap, bits=config.model.bits), axis_name = 'batch')
+
+  
+  sample_step = functools.partial(seg_sample_step, bit_scale=config.model.bit_scale, ddpm_params=ddpm_params, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0)
+  p_sample_step = jax.pmap(sample_step, axis_name='batch')
+
+  
+  train_metrics_last_t = time.time()
+  logging.info('Initial compilation, this might take some minutes...')
+  if True:
+          step=step_offset
           # generate and save sampling 
           logging.info(f'generating samples....')
           samples_pred = []

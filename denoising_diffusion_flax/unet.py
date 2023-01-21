@@ -288,6 +288,8 @@ class Unet(nn.Module):
     def __call__(self, x, time):
         B, H, W, C = x.shape
 
+        print('unet input shape', x.shape)
+        
         init_dim = self.dim if self.init_dim is None else self.init_dim
         hs = []
         h = nn.Conv(
@@ -358,13 +360,19 @@ class Unet(nn.Module):
         # final 
         h = jnp.concatenate([h, hs.pop()], axis=-1)
         assert h.shape[-1] == init_dim * 2
-    
+
+        print('h shape', h.shape)
+        
         out = ResnetBlock(dim=self.dim,groups=self.resnet_block_groups, dtype=self.dtype, name = 'final.resblock_0' )(h, time_emb)
         
         default_out_dim = C * (1 if not self.learned_variance else 2)
         out_dim = default_out_dim if self.out_dim is None else self.out_dim
+
+        res = (nn.Conv(out_dim, kernel_size=(1,1), dtype=self.dtype, name= 'final.conv_0')(out))
+
+        print('unet output shape', res)
         
-        return(nn.Conv(out_dim, kernel_size=(1,1), dtype=self.dtype, name= 'final.conv_0')(out))
+        return res
 
 
 

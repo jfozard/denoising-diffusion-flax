@@ -23,6 +23,8 @@ import jax.numpy as jnp
 import numpy as np
 import jax 
 
+from jax.numpy.fft import fft2, ifft2
+
 import ml_collections
 import tensorflow as tf
 import tensorflow_datasets as tfds
@@ -31,7 +33,7 @@ import wandb
 
 import unet
 import utils
-from sampling import sample_loop, ddpm_sample_step, model_predict
+from sampling import sample_loop, ddpm_sample_step, model_predict_fft
 
 
 def flatten(x):
@@ -243,11 +245,17 @@ def create_ema_decay_schedule(config):
 
 def q_sample(x, t, noise, ddpm_params):
 
-    sqrt_alpha_bar = ddpm_params['sqrt_alphas_bar'][t, None, None, None]
-    sqrt_1m_alpha_bar = ddpm_params['sqrt_1m_alphas_bar'][t,None,None,None]
+    sqrt_alpha_bar = ddpm_params['sqrt_alphas_bar'][t,:,:,None]
+    sqrt_1m_alpha_bar = ddpm_params['sqrt_1m_alphas_bar'][t,:,:,None]
+    
+    x = fft2(x, axes=(-3,-2))
+    noise = fft2(noise, axes=(-3,-2))
+
     x_t = sqrt_alpha_bar * x + sqrt_1m_alpha_bar * noise
 
-    return x_t
+
+    
+    return ifft2(x_t, axes=(-3,-2)).real, x_t
 
 
 # train step
@@ -269,7 +277,9 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
     target = x if is_pred_x0 else noise
 
     # generate the noisy image (input for denoise model)
-    x_t = q_sample(x, batched_t, noise, ddpm_params)
+    x_t, x_fft_t = q_sample(x, batched_t, noise, ddpm_params)
+
+    print('x, x_t', x.shape, x_t.shape)
     
     # if doing self-conditioning, 50% of the time first estimate x_0 = f(x_t, 0, t) and then use the estimated x_0 for Self-Conditioning
     # we don't backpropagate through the estimated x_0 (exclude from the loss calculation)
@@ -281,9 +291,11 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
 
         # self-conditioning 
         def estimate_x0(_):
-            x0, _ = model_predict(state, x_t, zeros, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=False)
+            x0, *_ = model_predict_fft(state, x_t, x_fft_t, zeros, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=False)
             return x0
 
+        print('estimate x0', estimate_x0(None).shape)
+        
         x0 = jax.lax.cond(
             jax.random.uniform(condition_rng, shape=(1,))[0] < 0.5,
             estimate_x0,

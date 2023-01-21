@@ -254,8 +254,8 @@ def q_sample(x, t, noise, ddpm_params):
     x_t = sqrt_alpha_bar * x + sqrt_1m_alpha_bar * noise
 
 
-    
-    return ifft2(x_t, axes=(-3,-2)).real, x_t
+#    return x_t, None, noise
+    return ifft2(x_t, axes=(-3,-2)).real, x_t, None #ifft2(noise, axes=(-3,-2)).real
 
 
 # train step
@@ -274,11 +274,16 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
     rng, noise_rng = jax.random.split(rng)
     noise = jax.random.normal(noise_rng, x.shape)
     # if is_pred_x0 == True, the target for loss calculation is x, else noise
-    target = x if is_pred_x0 else noise
+
+    print('is_pred_x0', is_pred_x0)
+    
 
     # generate the noisy image (input for denoise model)
-    x_t, x_fft_t = q_sample(x, batched_t, noise, ddpm_params)
+    x_t, x_fft_t, noise2 = q_sample(x, batched_t, noise, ddpm_params)
 
+    target = x if is_pred_x0 else noise
+
+    
     print('x, x_t', x.shape, x_t.shape)
     
     # if doing self-conditioning, 50% of the time first estimate x_0 = f(x_t, 0, t) and then use the estimated x_0 for Self-Conditioning
@@ -515,7 +520,74 @@ def train(config: ml_collections.ConfigDict,
   return(state)
 
 
+def sample(config: ml_collections.ConfigDict, 
+          workdir: str):
+  """Execute model training loop.
 
+  Args:
+    config: Hyperparameter configuration for training and evaluation.
+    workdir: Directory where the tensorboard summaries are written to.
+
+  Returns:
+    Final TrainState.
+  """
+    # create writer 
+
+  sample_dir = os.path.join(workdir, "samples")
+
+  rng = jax.random.PRNGKey(config.seed)
+
+  rng, d_rng = jax.random.split(rng) 
+  train_iter = get_dataset(d_rng, config)
+  
+  num_steps = config.training.num_train_steps
+  
+  rng, state_rng = jax.random.split(rng)
+  state = create_train_state(state_rng, config)
+  state = restore_checkpoint(state, workdir)
+  # step_offset > 0 if restarting from checkpoint
+  step = step_offset = int(state.step)
+  state = jax_utils.replicate(state)
+  
+  loss_fn = get_loss_fn(config)
+ 
+  ddpm_params = utils.get_ddpm_params(config.ddpm)
+
+
+  sample_step = functools.partial(ddpm_sample_step, ddpm_params=ddpm_params, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0)
+  p_sample_step = jax.pmap(sample_step, axis_name='batch')
+
+  rng, d_rng = jax.random.split(rng) 
+  train_iter = get_dataset(d_rng, config)
+
+  batch = next(iter(train_iter))
+  
+  logging.info('Initial compilation, this might take some minutes...')
+  if True:
+          logging.info(f'generating samples....')
+          samples = []
+          for i in trange(0, config.training.num_sample, config.data.batch_size):
+              rng, sample_rng = jax.random.split(rng)
+              samples.append(sample_loop(sample_rng, state, tuple(batch['image'].shape), p_sample_step, config.ddpm.timesteps))
+          samples = jnp.concatenate(samples) # num_devices, batch, H, W, C
+          
+          this_sample_dir = os.path.join(sample_dir, f"iter_{step}_host_{jax.process_index()}")
+          tf.io.gfile.makedirs(this_sample_dir)
+          
+          with tf.io.gfile.GFile(
+              os.path.join(this_sample_dir, "sample.png"), "wb") as fout:
+            samples_array = utils.save_image(samples, config.training.num_sample, fout, padding=2)
+            if config.wandb.log_sample:
+                utils.wandb_log_image(samples_array, step+1)
+          # save the chceckpoint
+          save_checkpoint(state, workdir)
+          if step + 1 == num_steps and config.wandb.log_model:
+              utils.wandb_log_model(workdir, step+1)
+
+  # Wait until computations are done before exiting
+  jax.random.normal(jax.random.PRNGKey(0), ()).block_until_ready()
+
+  return(state)
 
 
 

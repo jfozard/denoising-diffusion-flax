@@ -187,7 +187,7 @@ def seg_sample_step(state, rng, x, x_fft, y, t, x0_last, bit_scale, ddpm_params,
         posterior_variance = beta * (1 - alpha_bar_last) / (1. - alpha_bar)
         posterior_log_variance = jnp.log(jnp.clip(posterior_variance, a_min = 1e-20))
 
-        x_fft = posterior_mean_fft + jnp.exp(0.5 *  posterior_log_variance) * jax.random.normal(rng, x.shape) # ?
+        x_fft = posterior_mean_fft + jnp.exp(0.5 *  posterior_log_variance) * fft2(jax.random.normal(rng, x.shape)) # ?
         x = ifft2(x_fft).real
     else:
         coef_x0 = beta * sqrt_alpha_bar_last / (1. - alpha_bar)

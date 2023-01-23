@@ -53,6 +53,62 @@ class SinusoidalPosEmb(nn.Module):
         emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=-1)
         return emb
 
+"""
+def sincosemb1d(emb_dim, pos):
+    omega = jnp.arange(emb_dim // 2, dtype=jnp.float32)
+    omega /= emb_dim / 2.0
+    omega = 1.0 / 10000 * omega
+
+    pos = pos.reshape(-1)
+    out = jnp.einsum("m, d -> md", pos, omega)
+
+    return jnp.concatenate([jnp.sin(out), jnp.cos(out)], axis=1)
+
+
+def sincosposemb(emb_dim, grid_size):
+    grid_h = jnp.arange(grid_size, dtype=jnp.float32)
+    grid_w = jnp.arange(grid_size, dtype=jnp.float32)
+    grid = jnp.meshgrid(grid_w, grid_h)
+    grid = jnp.stack(grid, axis=0)
+    grid = jnp.reshape(grid, [2, 1, grid_size, grid_size])
+
+    emb_height = sincosemb1d(emb_dim // 2, grid[0])
+    emb_width = sincosemb1d(emb_dim // 2, grid[1])
+
+    pos_emb = jnp.concatenate([emb_height, emb_width], axis=1)
+    return jnp.expand_dims(jnp.concatenate([jnp.zeros([1, emb_dim]), pos_emb], 0), 0)
+
+
+def posemb_sincos_2d(patches, temperature = 10000, dtype = torch.float32):
+    _, h, w, dim, device, dtype = *patches.shape, patches.device, patches.dtype
+
+    y, x = torch.meshgrid(torch.arange(h, device = device), torch.arange(w, device = device), indexing = 'ij')
+    assert (dim % 4) == 0, 'feature dimension must be multiple of 4 for sincos emb'
+    omega = torch.arange(dim // 4, device = device) / (dim // 4 - 1)
+    omega = 1. / (temperature ** omega)
+
+    y = y.flatten()[:, None] * omega[None, :]
+    x = x.flatten()[:, None] * omega[None, :] 
+    pe = torch.cat((x.sin(), x.cos(), y.sin(), y.cos()), dim = 1)
+    return pe.type(dtype)
+"""
+
+
+def posemb_sincos_2d(patches, temperature = 10000):
+    b, dim, h, w = patches.shape
+
+    y, x = jnp.meshgrid(jnp.arange(h), jnp.arange(w), indexing = 'ij')
+    assert (dim % 4) == 0, 'feature dimension must be multiple of 4 for sincos emb'
+    omega = jnp.arange(dim // 4) / (dim // 4 - 1)
+    omega = 1. / (temperature ** omega)
+
+    y = y[None, :, :] * omega[:, None, None]
+    x = x[None, :, :] * omega[:, None, None] 
+    pe = jnp.concatenate((jnp.sin(x), jnp.cos(x), jnp.sin(y), jnp.cos(y)), axis = 0)[None, :, :, :]
+    return pe
+
+
+
 class Downsample(nn.Module):
 
   dim :Optional[int] = None
@@ -228,6 +284,9 @@ class Attention(nn.Module):
     @nn.compact
     def __call__(self, x):
         B, H, W, C = x.shape
+
+#        x = x
+
         dim = self.dim_head * self.heads
 
         qkv = nn.Conv(features= dim * 3, kernel_size=(1, 1),
@@ -366,7 +425,12 @@ class Unet(nn.Module):
         # middle
         h =  ResnetBlock(dim= mid_dim, groups= self.resnet_block_groups, dtype=self.dtype, name = 'mid.resblock_0')(h, time_emb)
         if not self.simple:
-            h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_0')(h)
+            h = h + posemb_sincos_2d(h)
+            for i in model.n_attn_blocks:
+                h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_{i}')(h)
+
+            
+#            h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_0')(h)
         else:
             h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_0')(h)
         

@@ -13,7 +13,7 @@ def cosine_beta_schedule(timesteps):
     s=0.008
     max_beta=0.999
     ts = jnp.linspace(0, 1, timesteps + 1)[:,None,None]
-    x, y = jnp.ogrid[:64,:64]
+    x, y = jnp.ogrid[:128,:128]
     r = jnp.sqrt(x**2+y**2+1)[None,:,:]
     p = jnp.maximum(jnp.minimum(1.0, 1-(r-20)**2/200), 1.0)
     print(p.shape)

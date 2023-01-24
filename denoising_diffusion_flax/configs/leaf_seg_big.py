@@ -51,7 +51,7 @@ def get_config():
   data.dataset ='jf_leaves'
   data.batch_size = 16
   data.cache = False
-  data.image_size = 64
+  data.image_size = 128
   data.channels = 1*12
 
 

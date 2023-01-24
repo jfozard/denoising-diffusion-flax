@@ -23,7 +23,7 @@ def get_config():
   training.loss_type = 'l2'
   training.half_precision = False
   training.save_and_sample_every = 2000
-  training.num_sample = 64
+  training.num_sample = 16
 
 
   # ema
@@ -51,19 +51,19 @@ def get_config():
   data.dataset ='jf_leaves'
   data.batch_size = 16
   data.cache = False
-  data.image_size = 64
+  data.image_size = 256
   data.channels = 1*12
 
 
   # model
   config.model = model = ml_collections.ConfigDict()
   model.dim = 128
-  model.dim_mults = (1, 1, 2, 4)
+  model.dim_mults = (1,1,2,4)
   model.simple = False
   model.bit_scale = 0.1
   model.full_attn_at_top = True
   model.bits = 12
-  model.n_attn = 4
+  model.n_attn_blocks = 4
   model.ffn = True
   
   # optim

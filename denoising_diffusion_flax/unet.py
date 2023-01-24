@@ -383,9 +383,10 @@ class FFNBlock(nn.Module):
         B, H, W, C = x.shape
         y = nn.Conv(features=self.dim_ff, kernel_size=(1, 1),  dtype=self.dtype, name='ffn.linear1')(x)
         y = nn.relu(y)
-        y = nn.Dropout(self.dim_model, name='ffn.dropout')(y)
-        y = nn.Conv(features=C, kernel_size=(1, 1),  dtype=self.dtype, name='ffn.linear2')(y)
-        y = nn.Dropout(self.dim_model, name='ffn.dropout2')(y)
+#        y = nn.Dropout(self.dropout, name='ffn.dropout')(y)
+        y = nn.Conv(features=self.dim_model, kernel_size=(1, 1),  dtype=self.dtype, name='ffn.linear2')(y)
+#        y = nn.relu(y)
+#        y = nn.Dropout(self.dropout, name='ffn.dropout2')(y)
         y = nn.LayerNorm(name='ffn.layernorm')(y)
         return x + y
         
@@ -447,10 +448,10 @@ class Unet(nn.Module):
         h =  ResnetBlock(dim= mid_dim, groups= self.resnet_block_groups, dtype=self.dtype, name = 'mid.resblock_0')(h, time_emb)
         if not self.simple:
             h = h + posemb_sincos_2d(h)
-            for i in model.n_attn_blocks:
-                h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_{i}')(h)
-                if model.ffn:
-                    h = FFNBlock(dtype=self.dtype, name = 'mid.ffnblock_{i}')(h)
+            for i in range(model.n_attn_blocks):
+                h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = f'mid.attenblock_{i}')(h)
+#                if model.ffn:
+#                    h = FFNBlock(dtype=self.dtype, name = f'mid.ffnblock_{i}')(h)
             
 #            h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_0')(h)
         else:
@@ -584,6 +585,8 @@ class SegUnet(nn.Module):
     dtype: Any = jnp.float32
     simple: bool = False
     full_attn_at_top: bool=False
+    n_attn_blocks: int = 4
+    ffn: bool = True
 
     @nn.compact
     def __call__(self, x, time):
@@ -626,10 +629,18 @@ class SegUnet(nn.Module):
 
         # middle
         h =  ResnetBlock(dim= mid_dim, groups= self.resnet_block_groups, dtype=self.dtype, name = 'mid.resblock_0')(h, time_emb)
+
         if not self.simple:
-            h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_0')(h)
-        else:
-            h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_0')(h)
+            h = h + posemb_sincos_2d(h)
+            for i in range(self.n_attn_blocks):
+                h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = f'mid.attenblock_{i}')(h)
+                if self.ffn:
+                    h = FFNBlock(dtype=self.dtype, name = f'mid.ffnblock_{i}')(h)
+
+#        if not self.simple:
+#            h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_0')(h)
+#        else:
+#            h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_0')(h)
         
         h = ResnetBlock(dim= mid_dim, groups= self.resnet_block_groups, dtype=self.dtype, name = 'mid.resblock_1')(h, time_emb)
 

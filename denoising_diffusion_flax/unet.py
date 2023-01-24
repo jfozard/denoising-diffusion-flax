@@ -356,9 +356,9 @@ class AttnBlock(nn.Module):
     heads: int = 4
     dim_head: int = 32
     use_linear_attention: bool = True
+
     dtype: Any = jnp.float32
-
-
+    
     @nn.compact
     def __call__(self, x):
       B, H, W, C = x.shape
@@ -368,10 +368,31 @@ class AttnBlock(nn.Module):
       else:
         attn = Attention(self.heads, self.dim_head, dtype=self.dtype)
       out = attn(normed_x)
+      
       assert out.shape == (B, H, W, C)
       return(out + x)
 
+class FFNBlock(nn.Module):
+    dim_model: int = 512
+    dim_ff: int = 512
+    dropout: float = 0.0
+    dtype: Any = jnp.float32
+    
+    @nn.compact
+    def __call__(self, x):
+        B, H, W, C = x.shape
+        y = nn.Conv(features=self.dim_ff, kernel_size=(1, 1),  dtype=self.dtype, name='ffn.linear1')(x)
+        y = nn.relu(y)
+        y = nn.Dropout(self.dim_model, name='ffn.dropout')(y)
+        y = nn.Conv(features=C, kernel_size=(1, 1),  dtype=self.dtype, name='ffn.linear2')(y)
+        y = nn.Dropout(self.dim_model, name='ffn.dropout2')(y)
+        y = nn.LayerNorm(name='ffn.layernorm')(y)
+        return x + y
+        
+        
+        
 
+  
 class Unet(nn.Module):
     dim: int
     init_dim: Optional[int] = None # if None, same as dim
@@ -428,7 +449,8 @@ class Unet(nn.Module):
             h = h + posemb_sincos_2d(h)
             for i in model.n_attn_blocks:
                 h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_{i}')(h)
-
+                if model.ffn:
+                    h = FFNBlock(dtype=self.dtype, name = 'mid.ffnblock_{i}')(h)
             
 #            h = AttnBlock(use_linear_attention=self.full_attn_at_top, dtype=self.dtype, name = 'mid.attenblock_0')(h)
         else:

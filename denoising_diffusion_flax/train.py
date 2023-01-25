@@ -836,6 +836,13 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_p
     
 #    p2_loss_weight = ddpm_params['p2_loss_weight']
 
+    rng, image_rng = jax.random.split(rng)
+
+    jnp.where(jax.random.uniform(image_rng, shape=(1,))[0] < 0.5,
+      y0,
+      jnp.zeros_like(y0))
+
+
     def compute_loss(params):
         pred = state.apply_fn({'params':params}, jnp.concatenate([x_t, y], axis=-1), batched_t)
         loss = loss_fn(flatten(pred),flatten(target))

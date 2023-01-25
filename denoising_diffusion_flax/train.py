@@ -580,7 +580,7 @@ def create_train_state_seg(rng, config: ml_collections.ConfigDict):
 
   rng, rng_params = jax.random.split(rng)
   image_size = config.data.image_size
-  input_dim = config.data.channels 
+  input_dim = config.data.channels * 2 if config.ddpm.self_condition else config.data.channels
   params = initialized_seg(rng_params, image_size, input_dim, model)
 
   tx = create_optimizer(config.optim)

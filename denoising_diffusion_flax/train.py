@@ -1446,7 +1446,7 @@ def train_seg(config: ml_collections.ConfigDict,
   
   loss_fn = get_loss_fn(config)
  
-  ddpm_params = utils.get_ddpm_params(config.ddpm)
+  ddpm_params = utils.get_ddpm_params(config.ddpm, config.data.image_size)
   ema_decay_fn = create_ema_decay_schedule(config.ema)
   
   train_step = functools.partial(seg_loss, ddpm_params=ddpm_params, loss_fn =loss_fn, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0, pmap_axis ='batch')
@@ -1615,7 +1615,7 @@ def sample_seg(config: ml_collections.ConfigDict,
   
   loss_fn = get_loss_fn(config)
  
-  ddpm_params = utils.get_ddpm_params(config.ddpm)
+  ddpm_params = utils.get_ddpm_params(config.ddpm, config.data.image_size)
   ema_decay_fn = create_ema_decay_schedule(config.ema)
   
   p_bits_to_img = jax.pmap(functools.partial(bits_to_img, cmap=cmap, bits=config.model.bits), axis_name = 'batch')
@@ -1640,18 +1640,18 @@ def sample_seg(config: ml_collections.ConfigDict,
               rng, sample_rng = jax.random.split(rng)
               s = sample_loop_seg(sample_rng, state, batch, p_sample_step, config.ddpm.timesteps)
 #              print('s', s.shape)
-              samples_pred.append(p_bits_to_img(s))
-              samples_target.append(p_bits_to_img(batch['mask']))
-              samples_image.append(jnp.repeat(0.5*(batch['image']+1), 3, axis=-1))
+              samples_pred.append(np.array(p_bits_to_img(s)))
+              samples_target.append(np.array(p_bits_to_img(batch['mask'])))
+              samples_image.append(np.repeat(0.5*(np.array(batch['image']+1)), 3, axis=-1))
               
               #              print('s0', samples[0].shape)
-          samples_pred = jnp.concatenate(samples_pred) # num_devices, batch, H, W, C
-          samples_target = jnp.concatenate(samples_target) # num_devices, batch, H, W, C
-          samples_image = jnp.concatenate(samples_image) # num_devices, batch, H, W, C
+          samples_pred = np.concatenate(samples_pred) # num_devices, batch, H, W, C
+          samples_target = np.concatenate(samples_target) # num_devices, batch, H, W, C
+          samples_image = np.concatenate(samples_image) # num_devices, batch, H, W, C
 
           print(samples_pred.shape, samples_target.shape, samples_image.shape)
           
-          samples_all = jnp.stack((samples_pred, samples_target, samples_image), axis=2)
+          samples_all = np.stack((samples_pred, samples_target, samples_image), axis=2)
           
           print('sa.shape', samples_all.shape)
           

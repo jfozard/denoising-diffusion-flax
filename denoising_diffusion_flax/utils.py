@@ -7,13 +7,13 @@ import wandb
 from ml_collections import ConfigDict
 from jax.numpy.fft import fft2, ifft2
 
-def cosine_beta_schedule(timesteps):
+def cosine_beta_schedule(timesteps, size):
     """Return cosine schedule 
     as proposed in https://arxiv.org/abs/2102.09672 """
     s=0.008
     max_beta=0.999
     ts = jnp.linspace(0, 1, timesteps + 1)[:,None,None]
-    x, y = jnp.ogrid[:128,:128]
+    x, y = jnp.ogrid[:size,:size]
     r = jnp.sqrt(x**2+y**2+1)[None,:,:]
     p = jnp.maximum(jnp.minimum(1.0, 1-(r-20)**2/200), 1.0)
     print(p.shape)
@@ -35,16 +35,16 @@ def linear_beta_schedule(timesteps):
         beta_start, beta_end, timesteps, dtype=jnp.float64)
     return(betas)
 
-def get_ddpm_params(config):
+def get_ddpm_params(config, image_size):
     schedule_name = config.beta_schedule
     timesteps = config.timesteps
     p2_loss_weight_gamma = config.p2_loss_weight_gamma
     p2_loss_weight_k = config.p2_loss_weight_gamma
 
     if schedule_name == 'linear':
-        betas = linear_beta_schedule(timesteps)
+        betas = linear_beta_schedule(timesteps, image_size)
     elif schedule_name == 'cosine':
-        betas = cosine_beta_schedule(timesteps)
+        betas = cosine_beta_schedule(timesteps, image_size)
     else:
         raise ValueError(f'unknown beta schedule {schedule_name}')
     assert betas.shape[0] == timesteps

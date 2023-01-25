@@ -63,7 +63,7 @@ def get_config():
   model.bit_scale = 0.1
   model.full_attn_at_top = True
   model.bits = 12
-  model.n_attn_blocks = 4
+  model.n_attn_blocks = 2
   model.ffn = True
   
   # optim

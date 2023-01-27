@@ -800,6 +800,14 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_p
     noise = jax.random.normal(noise_rng, x.shape)
     # if is_pred_x0 == True, the target for loss calculation is x, else noise
     target = x if is_pred_x0 else noise
+
+    rng, image_rng = jax.random.split(rng)
+
+    y = jnp.where(jax.random.uniform(image_rng, shape=(1,))[0] < 0.9,
+      y,
+      jnp.zeros_like(y))
+
+
  
     #noise_level = alpha_cosine_log_snr(batched_t)
 
@@ -835,12 +843,6 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_p
         x_t = jnp.concatenate([x_t, x0], axis=-1)
     
 #    p2_loss_weight = ddpm_params['p2_loss_weight']
-
-    rng, image_rng = jax.random.split(rng)
-
-    jnp.where(jax.random.uniform(image_rng, shape=(1,))[0] < 0.5,
-      y0,
-      jnp.zeros_like(y0))
 
 
     def compute_loss(params):

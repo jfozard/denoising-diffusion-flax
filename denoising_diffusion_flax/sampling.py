@@ -152,8 +152,8 @@ def ddpm_sample_step(state, rng, x, t, x0_last, bit_scale, ddpm_params, self_con
 
 def seg_sample_step(state, rng, x_orig, x_fft, y, t, x_last, bit_scale, ddpm_params, self_condition=False, is_pred_x0=False, use_fft=False):
 
-    print(bit_scale, x.shape, x_last.shape) 
-    batched_t = jnp.ones((x.shape[0],), dtype=jnp.int32) * t
+    print(bit_scale, x_orig.shape, x_last.shape) 
+    batched_t = jnp.ones((x_orig.shape[0],), dtype=jnp.int32) * t
 
     if use_fft:
         seg_predict = seg_model_predict_fft
@@ -184,7 +184,7 @@ def seg_sample_step(state, rng, x_orig, x_fft, y, t, x_last, bit_scale, ddpm_par
         coef_x0 = beta * sqrt_alpha_bar_last / (1. - alpha_bar)
         coef_xt = (1. - alpha_bar_last) * jnp.sqrt(alpha) / ( 1- alpha_bar)        
         posterior_mean_fft = coef_x0 * x0_fft + coef_xt * x_fft
-        posterior_mean = coef_x0 * x0 + coef_xt * x
+        posterior_mean = coef_x0 * x0 + coef_xt * x_orig
         
         posterior_variance = beta * (1 - alpha_bar_last) / (1. - alpha_bar)
         posterior_log_variance = jnp.log(jnp.clip(posterior_variance, a_min = 1e-20))
@@ -194,12 +194,12 @@ def seg_sample_step(state, rng, x_orig, x_fft, y, t, x_last, bit_scale, ddpm_par
     else:
         coef_x0 = beta * sqrt_alpha_bar_last / (1. - alpha_bar)
         coef_xt = (1. - alpha_bar_last) * jnp.sqrt(alpha) / ( 1- alpha_bar)        
-        posterior_mean = coef_x0 * x0 + coef_xt * x
+        posterior_mean = coef_x0 * x0 + coef_xt * x_orig
         
         posterior_variance = beta * (1 - alpha_bar_last) / (1. - alpha_bar)
         posterior_log_variance = jnp.log(jnp.clip(posterior_variance, a_min = 1e-20))
 
-        x = posterior_mean + jnp.exp(0.5 *  posterior_log_variance) * jax.random.normal(rng, x.shape) # ?
+        x = posterior_mean + jnp.exp(0.5 *  posterior_log_variance) * jax.random.normal(rng, x_orig.shape) # ?
 
         x_fft = None
     

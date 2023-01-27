@@ -279,7 +279,7 @@ def sample_loop_seg(rng, state, batch, p_sample_step, timesteps):
         rng, *step_rng = jax.random.split(rng, num=jax.local_device_count() + 1)
         step_rng = jnp.asarray(step_rng)
 #        print(shape, x.shape, x0.shape)
-        x, x_fft, x0, x_last = p_sample_step(state, step_rng, x, x_fft, y, jax_utils.replicate(t), x_prev)
+        x, x_fft, x0, x_last = p_sample_step(state, step_rng, x, x_fft, y, jax_utils.replicate(t), x_last)
 #        list_x0.append(x0)
     # normalize to [0,1]
     #img = unnormalize_to_zero_to_one(jnp.asarray(x0))

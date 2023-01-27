@@ -781,7 +781,7 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
     return new_state, metrics
 
 # train step
-def seg_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pred_x0=False, pmap_axis='batch'):
+def seg_loss(rng, state, batch, bit_scale, ddpm_params, loss_fn, self_condition=False, is_pred_x0=False, pmap_axis='batch'):
     
     # run the forward diffusion process to generate noisy image x_t at timestep t
     x = batch['mask']
@@ -835,9 +835,10 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_p
         def estimate_x0(_):
             x0, _ = model_predict2(state, x_t, zeros, y, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=False)
 #            x0, _ = model_predict2(state, x_t, zeros, noise_level, ddpm_params, self_condition, is_pred_x0, use_ema=False)
+            #x0 = jnp.clip(x0, -bit_scale, bit_scale)
             x0_t = q_sample(x0, batched_t, noise, ddpm_params)
 
-            return jnp.concatenate([x0_t, x0], axis=-1)
+            return jnp.concatenate([x_t, x0_t], axis=-1)
 
 
         x_t = jax.lax.cond(
@@ -1465,7 +1466,7 @@ def train_seg(config: ml_collections.ConfigDict,
   ddpm_params = utils.get_ddpm_params(config.ddpm, config.data.image_size)
   ema_decay_fn = create_ema_decay_schedule(config.ema)
   
-  train_step = functools.partial(seg_loss, ddpm_params=ddpm_params, loss_fn =loss_fn, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0, pmap_axis ='batch')
+  train_step = functools.partial(seg_loss, bit_scale = config.model.bit_scale, ddpm_params=ddpm_params, loss_fn =loss_fn, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0, pmap_axis ='batch')
   p_train_step = jax.pmap(train_step, axis_name = 'batch')
   p_apply_ema = jax.pmap(apply_ema_decay, in_axes=(0, None), axis_name = 'batch')
   p_copy_params_to_ema = jax.pmap(copy_params_to_ema, axis_name='batch')

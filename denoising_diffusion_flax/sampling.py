@@ -104,7 +104,7 @@ def seg_model_predict_fft(state, x, x_fft, x_p, y, t, ddpm_params, self_conditio
         x0_pred_fft = noise_fft_to_x0_fft(noise_pred_fft, x_fft, t, ddpm_params)
         x0_pred = ifft2(x0_pred_fft).real
     
-    return x0_pred, x0_pred_fft, noise_pred, noise_pred_fft
+    return x0_pred,  noise_pred
 #    return x0_pred, None, noise_pred, None
 
 
@@ -129,7 +129,7 @@ def seg_model_predict(state, x, x_fft, x_p, y, t, ddpm_params, self_condition, i
         noise_pred = pred
         x0_pred = noise_to_x0(pred, x, t, ddpm_params)
 
-    return x0_pred, None, noise_pred, None
+    return x0_pred, noise_pred
 
 
 def ddpm_sample_step(state, rng, x, t, x0_last, bit_scale, ddpm_params, self_condition=False, is_pred_x0=False):
@@ -143,16 +143,16 @@ def ddpm_sample_step(state, rng, x, t, x0_last, bit_scale, ddpm_params, self_con
         x0, v = model_predict(state, x, None, batched_t,ddpm_params, self_condition, is_pred_x0, use_ema=True)
     
     # make sure x0 between [-1,1]
-    x0 = jnp.clip(x0, -bit_scale, bit_scale)
+    #x0 = jnp.clip(x0, -bit_scale, bit_scale)
 
     posterior_mean, posterior_log_variance = get_posterior_mean_variance(x, t, x0, v, ddpm_params)
     x = posterior_mean + jnp.exp(0.5 *  posterior_log_variance) * jax.random.normal(rng, x.shape) 
 
     return x, x0
 
-def seg_sample_step(state, rng, x, x_fft, y, t, x0_last, bit_scale, ddpm_params, self_condition=False, is_pred_x0=False, use_fft=True):
+def seg_sample_step(state, rng, x_orig, x_fft, y, t, x_last, bit_scale, ddpm_params, self_condition=False, is_pred_x0=False, use_fft=False):
 
-    print(bit_scale, x.shape, x0_last.shape) 
+    print(bit_scale, x.shape, x_last.shape) 
     batched_t = jnp.ones((x.shape[0],), dtype=jnp.int32) * t
 
     if use_fft:
@@ -161,14 +161,14 @@ def seg_sample_step(state, rng, x, x_fft, y, t, x0_last, bit_scale, ddpm_params,
         seg_predict = seg_model_predict
     
     if self_condition:
-        x0, x0_fft, eps, eps_fft = seg_predict(state, x, x_fft, x0_last, y, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=True) 
+        x0,  eps  = seg_predict(state, x_orig, x_fft, x_last, y, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=True) 
     else:
-        x0, x0_fft, eps, eps_fft = seg_predict(state, x, x_fft, None, y, batched_t,ddpm_params, self_condition, is_pred_x0, use_ema=True)
+        x0, eps = seg_predict(state, x_orig, x_fft, None, y, batched_t,ddpm_params, self_condition, is_pred_x0, use_ema=True)
     
     # make sure x0 between [-1,1]
-    if not use_fft:
-        x0 = jnp.clip(x0, -bit_scale, bit_scale)
-
+    #if not use_fft:
+#    x0 = jnp.clip(x0, -bit_scale, bit_scale)
+    
 #    posterior_mean, posterior_log_variance = get_posterior_mean_variance(x, t, x0, v, ddpm_params)
 
     beta = ddpm_params['betas'][t, :, :, None]
@@ -179,6 +179,8 @@ def seg_sample_step(state, rng, x, x_fft, y, t, x0_last, bit_scale, ddpm_params,
 
     if use_fft:
     # only needed when t > 0
+        x0_fft = fft2(x0)
+        
         coef_x0 = beta * sqrt_alpha_bar_last / (1. - alpha_bar)
         coef_xt = (1. - alpha_bar_last) * jnp.sqrt(alpha) / ( 1- alpha_bar)        
         posterior_mean_fft = coef_x0 * x0_fft + coef_xt * x_fft
@@ -203,7 +205,7 @@ def seg_sample_step(state, rng, x, x_fft, y, t, x0_last, bit_scale, ddpm_params,
     
     #x = posterior_mean + jnp.exp(0.5 *  posterior_log_variance) * jax.random.normal(rng, x.shape) # ?
     
-    return x, x_fft, x0
+    return x, x_fft, x0, x_orig
 
 
 """
@@ -270,14 +272,14 @@ def sample_loop_seg(rng, state, batch, p_sample_step, timesteps):
     x = batch['mask']
     y = batch['image']
     x = jax.random.normal(x_rng, x.shape)
-    x0 = jnp.zeros_like(x) # initialize x0 for self-conditioning
+    x_last = jnp.zeros_like(x) # initialize x0 for self-conditioning
     x_fft = fft2(x)
     # sample step
     for t in reversed(jnp.arange(timesteps)):
         rng, *step_rng = jax.random.split(rng, num=jax.local_device_count() + 1)
         step_rng = jnp.asarray(step_rng)
 #        print(shape, x.shape, x0.shape)
-        x, x_fft, x0 = p_sample_step(state, step_rng, x, x_fft, y, jax_utils.replicate(t), x0)
+        x, x_fft, x0, x_last = p_sample_step(state, step_rng, x, x_fft, y, jax_utils.replicate(t), x_prev)
 #        list_x0.append(x0)
     # normalize to [0,1]
     #img = unnormalize_to_zero_to_one(jnp.asarray(x0))

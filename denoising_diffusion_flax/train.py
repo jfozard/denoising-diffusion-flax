@@ -785,7 +785,7 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_p
     
     # run the forward diffusion process to generate noisy image x_t at timestep t
     x = batch['mask']
-    y = batch['image']
+    y0 = batch['image']
     assert x.dtype in [jnp.float32, jnp.float64]
     
    # create batched timesteps: t with shape (B,)
@@ -800,7 +800,15 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_p
     noise = jax.random.normal(noise_rng, x.shape)
     # if is_pred_x0 == True, the target for loss calculation is x, else noise
     target = x if is_pred_x0 else noise
- 
+
+    rng, image_rng = jax.random.split(rng)
+
+    
+    y = jnp.where(jax.random.uniform(image_rng, shape=(1,))[0] < 0.9,
+      y0,
+      jnp.zeros_like(y0))
+
+    
     #noise_level = alpha_cosine_log_snr(batched_t)
 
     #padded_noise_level = right_pad_dims_to(x, noise_level)
@@ -824,23 +832,21 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_p
         def estimate_x0(_):
             x0, _ = model_predict2(state, x_t, zeros, y, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=False)
 #            x0, _ = model_predict2(state, x_t, zeros, noise_level, ddpm_params, self_condition, is_pred_x0, use_ema=False)
-            return x0
+            x0_t = q_sample(x, batched_t, noise, ddpm_params)
 
-        x0 = jax.lax.cond(
+            return jnp.concatenate([x0_t, x0], axis=-1)
+
+
+        x_t = jax.lax.cond(
             jax.random.uniform(condition_rng, shape=(1,))[0] < 0.5,
             estimate_x0,
-            lambda _ :zeros,
+            lambda _ : jnp.concatenate([x_t, zeros], axis=-1),
             None)
                 
-        x_t = jnp.concatenate([x_t, x0], axis=-1)
     
 #    p2_loss_weight = ddpm_params['p2_loss_weight']
 
-    rng, image_rng = jax.random.split(rng)
 
-    jnp.where(jax.random.uniform(image_rng, shape=(1,))[0] < 0.5,
-      y0,
-      jnp.zeros_like(y0))
 
 
     def compute_loss(params):

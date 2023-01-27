@@ -827,12 +827,15 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_p
 
         rng, condition_rng = jax.random.split(rng)
         zeros = jnp.zeros_like(x_t)
+        rng, noise_rng = jax.random.split(rng)
+        noise = jax.random.normal(noise_rng, x.shape)
 
+        
         # self-conditioning 
         def estimate_x0(_):
             x0, _ = model_predict2(state, x_t, zeros, y, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=False)
 #            x0, _ = model_predict2(state, x_t, zeros, noise_level, ddpm_params, self_condition, is_pred_x0, use_ema=False)
-            x0_t = q_sample(x, batched_t, noise, ddpm_params)
+            x0_t = q_sample(x0, batched_t, noise, ddpm_params)
 
             return jnp.concatenate([x0_t, x0], axis=-1)
 

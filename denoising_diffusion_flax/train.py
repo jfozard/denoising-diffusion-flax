@@ -784,7 +784,7 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
     return new_state, metrics
 
 # train step
-def seg_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pred_x0=False, pmap_axis='batch'):
+def seg_loss(rng, state, batch, ddpm_params, loss_fn, bit_scale=0.1, self_condition=False, is_pred_x0=False, pmap_axis='batch'):
     
     # run the forward diffusion process to generate noisy image x_t at timestep t
     x = batch['mask']
@@ -841,6 +841,7 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_p
 
     def compute_loss(params):
         pred = state.apply_fn({'params':params}, jnp.concatenate([x_t, y], axis=-1), batched_t)
+        pred = jnp.clip(pred, -bit_scale, bit_scale)
         loss = loss_fn(flatten(pred),flatten(target))
         loss = jnp.mean(loss, axis= 1)
         assert loss.shape == (B,)

@@ -88,7 +88,6 @@ def seg_model_predict(state, x, x0, y, t, ddpm_params, self_condition, is_pred_x
 
 def ddpm_sample_step(state, rng, x, t, x0_last, bit_scale, ddpm_params, self_condition=False, is_pred_x0=False):
 
-    print(bit_scale, x.shape, x0_last.shape) 
     batched_t = jnp.ones((x.shape[0],), dtype=jnp.int32) * t
     
     if self_condition:
@@ -106,7 +105,6 @@ def ddpm_sample_step(state, rng, x, t, x0_last, bit_scale, ddpm_params, self_con
 
 def seg_sample_step(state, rng, x, y, t, x0_last, bit_scale, ddpm_params, self_condition=False, is_pred_x0=False):
 
-    print(bit_scale, x.shape, x0_last.shape) 
     batched_t = jnp.ones((x.shape[0],), dtype=jnp.int32) * t
     
     if self_condition:
@@ -208,7 +206,7 @@ def ddim_seg_sample_step(state, rng, x, y, t, t_next, x0_last, bit_scale, ddpm_p
     c = jnp.sqrt(1 - alpha_next - sigma ** 2)
 
     # make sure x0 between [-1,1]
-#    x0 = jnp.clip(x0, -bit_scale, bit_scale)
+    x0 = jnp.clip(x0, -bit_scale, bit_scale)
 
     x = x0 * jnp.sqrt(alpha_next) + c * v + sigma * jax.random.normal(rng, x.shape) 
     
@@ -235,7 +233,6 @@ def ddim_sample_loop_seg(rng, state, batch, p_sample_step, timesteps, sampling_t
     x0 = jnp.zeros_like(x) # initialize x0 for self-conditioning
     # sample step
     for time, time_next in time_pairs:
-        print(time, time_next)
         rng, *step_rng = jax.random.split(rng, num=jax.local_device_count() + 1)
         step_rng = jnp.asarray(step_rng)
         x, x0 = p_sample_step(state, step_rng, x, y, jax_utils.replicate(time), jax_utils.replicate(time_next), x0)

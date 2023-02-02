@@ -56,7 +56,7 @@ def model_predict(state, x, x0, t, ddpm_params, self_condition, is_pred_x0, use_
 
     if is_pred_x0: # if the objective is is_pred_x0, pred == x0_pred
         x0_pred = pred
-        noise_pred =  x0_to_noise(pred, x, t, ddpm_params)
+        noise_pred = x0_to_noise(pred, x, t, ddpm_params)
     else:
         noise_pred = pred
         x0_pred = noise_to_x0(pred, x, t, ddpm_params)
@@ -123,7 +123,7 @@ def seg_sample_step(state, rng, x, y, t, x0_last, bit_scale, ddpm_params, self_c
     return x, x0
 
 
-def sample_loop(rng, state, shape, p_sample_step, timesteps):
+def sample_loop(rng, state, shape, p_sample_step, timesteps, save_x0=False):
     
     # shape include the device dimension: (device, per_device_batch_size, H,W,C)
     rng, x_rng = jax.random.split(rng)
@@ -137,13 +137,17 @@ def sample_loop(rng, state, shape, p_sample_step, timesteps):
         step_rng = jnp.asarray(step_rng)
 #        print(shape, x.shape, x0.shape)
         x, x0 = p_sample_step(state, step_rng, x, jax_utils.replicate(t), x0)
-        list_x0.append(x0)
+        if save_x0:
+            list_x0.append(x0)
     # normalize to [0,1]
     #img = unnormalize_to_zero_to_one(jnp.asarray(x0))
-    
-    return jnp.asarray(x0)
 
-def sample_loop_seg(rng, state, batch, p_sample_step, timesteps):
+    if save_x0:
+        return jnp.asarray(x0, list_x0)
+    else:
+        return jnp.asarray(x0)
+
+def sample_loop_seg(rng, state, batch, p_sample_step, timesteps, save_x0=False):
     
     # shape include the device dimension: (device, per_device_batch_size, H,W,C)
     rng, x_rng = jax.random.split(rng)
@@ -159,9 +163,90 @@ def sample_loop_seg(rng, state, batch, p_sample_step, timesteps):
         step_rng = jnp.asarray(step_rng)
 #        print(shape, x.shape, x0.shape)
         x, x0 = p_sample_step(state, step_rng, x, y, jax_utils.replicate(t), x0)
-        list_x0.append(x0)
+        if save_x0:
+            list_x0.append(x0)
     # normalize to [0,1]
     #img = unnormalize_to_zero_to_one(jnp.asarray(x0))
     
-    return jnp.asarray(x0)
+    if save_x0:
+        return jnp.asarray(x0), list_x0
+    else:
+        return jnp.asarray(x0)
+
+
+def ddim_seg_sample_step(state, rng, x, y, t, t_next, x0_last, bit_scale, ddpm_params, self_condition=False, is_pred_x0=False):
+
+    batched_t = jnp.ones((x.shape[0],), dtype=jnp.int32) * t
+    
+    if self_condition:
+        x0, v = seg_model_predict(state, x, x0_last, y, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=True) 
+    else:
+        x0, v = seg_model_predict(state, x, None, y, batched_t, ddpm_params, self_condition, is_pred_x0, use_ema=True)
+
+
+    alpha_bar = ddpm_params['alphas_bar'][t, None,None,None]  # Does this correspond to alphas_cumprod in LR's repo?
+    alpha_bar_last = ddpm_params['alphas_bar'][t_next, None,None,None]
+    beta = ddpm_params['betas'][t, None,None,None]
+    alpha = ddpm_params['alphas'][t, None,None,None]
+
+
+#    c_x0 = beta*jnp.sqrt(alpha_bar_last)/(1-alpha_bar)
+#    c_xt = (1-alpha_bar_last)*jnp.sqrt(alpha)/(1-alpha_bar)
+#    c_noise = jnp.exp(0.5 *  jnp.log(jnp.clip(beta*(1-alpha_bar_last)/(1-alpha_bar), a_min=1e-20)))
+
+#    x = x * c_xt + x0*c_x0 + c_noise * jax.random.normal(rng, x.shape) 
+
+   
+    alpha = ddpm_params['alphas_bar'][t, None,None,None]  # Does this correspond to alphas_cumprod in LR's repo?
+    alpha_next = ddpm_params['alphas_bar'][t_next, None,None,None]
+#    beta = ddpm_params['betas'][t, None,None,None]
+#    alpha = ddpm_params['alphas'][t, None,None,None]
+
+    eta = ddpm_params['eta']
+
+    sigma = eta * jnp.sqrt((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha))
+    c = jnp.sqrt(1 - alpha_next - sigma ** 2)
+
+    # make sure x0 between [-1,1]
+#    x0 = jnp.clip(x0, -bit_scale, bit_scale)
+
+    x = x0 * jnp.sqrt(alpha_next) + c * v + sigma * jax.random.normal(rng, x.shape) 
+    
+    return x, x0
+
+
+
+def ddim_sample_loop_seg(rng, state, batch, p_sample_step, timesteps, sampling_timesteps, save_x0=False):
+    
+    # shape include the device dimension: (device, per_device_batch_size, H,W,C)
+    rng, x_rng = jax.random.split(rng)
+    list_x0 = []
+    # generate the initial sample (pure noise)
+    x = batch['mask']
+    y = batch['image']
+
+
+    times = jnp.linspace(-1, timesteps - 1, sampling_timesteps+1)
+    times = times[::-1].astype(jnp.int32)
+    time_pairs = jnp.array(list(zip(times[:-1], times[1:])))
+
+    
+    x = jax.random.normal(x_rng, x.shape)
+    x0 = jnp.zeros_like(x) # initialize x0 for self-conditioning
+    # sample step
+    for time, time_next in time_pairs:
+        print(time, time_next)
+        rng, *step_rng = jax.random.split(rng, num=jax.local_device_count() + 1)
+        step_rng = jnp.asarray(step_rng)
+        x, x0 = p_sample_step(state, step_rng, x, y, jax_utils.replicate(time), jax_utils.replicate(time_next), x0)
+        if save_x0:
+            list_x0.append(jnp.asarray(x0))
+    # normalize to [0,1]
+    #img = unnormalize_to_zero_to_one(jnp.asarray(x0))
+
+    if save_x0:
+        return jnp.asarray(x0), list_x0
+    else:
+        return jnp.asarray(x0)
+
 

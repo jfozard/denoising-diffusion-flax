@@ -49,6 +49,7 @@ def get_ddpm_params(config):
 
 
     return {
+      'eta': config.eta,
       'betas': betas,
       'alphas': alphas,
       'alphas_bar': alphas_bar,
@@ -68,6 +69,7 @@ def make_grid(samples, n_samples, padding=2, pad_value=0.0):
   nrow = int(np.sqrt(ndarray.shape[0]))
 
   if not (isinstance(ndarray, jnp.ndarray) or
+          isinstance(ndarray, np.ndarray) or
           (isinstance(ndarray, list) and
            all(isinstance(t, jnp.ndarray) for t in ndarray))):
     raise TypeError("array_like of tensors expected, got {}".format(

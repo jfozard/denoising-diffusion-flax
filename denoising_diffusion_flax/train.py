@@ -42,9 +42,13 @@ from sampling import sample_loop, sample_loop_seg, ddpm_sample_step, model_predi
 def flatten(x):
   return x.reshape(x.shape[0], -1)
 
+def l2_loss_w(logit, target, w):
+    return ((logit - target)**2).mean(axis=-1, keepdims=True)*w
+
 def l2_loss(logit, target):
     return (logit - target)**2
 
+  
 def l1_loss(logit, target): 
     return jnp.abs(logit - target)
 
@@ -99,6 +103,12 @@ def bits_to_img(x, cmap, bits = 8):
     col = cmap[dec.astype(np.uint16)[...,0], :]
     return col
 
+
+def count_image(x, bits):
+    r = 2**bits - 1
+    x = np.clip((x * r + 0.5).astype(np.int16), 0, r)
+    counts = np.bincount(x.flatten())
+    return counts[x]
   
 def boundary(x):
 
@@ -403,6 +413,7 @@ def get_dataset_seg(rng, config, split_name='train'):
            return x.reshape((local_device_count, -1) + x.shape[1:])
 
         xs = {'image': normalize_to_neg_one_to_one(xs['image'])._numpy(),
+              'mask_counts': count_image(xs['mask']._numpy(), bits=config.model.bits),
               'mask': decimal_to_bits(xs['mask']._numpy(), bits=config.model.bits)*config.model.bit_scale }
 
          
@@ -611,7 +622,7 @@ def get_loss_fn(config):
     if config.training.loss_type == 'l1' :
         loss_fn = l1_loss
     elif config.training.loss_type == 'l2':
-        loss_fn = l2_loss
+        loss_fn = l2_loss_w
     elif config.training.loss_type == 'bce':
         loss_fn = bce_loss
     else:
@@ -784,12 +795,16 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
     return new_state, metrics
 
 # train step
-def seg_loss(rng, state, batch, ddpm_params, loss_fn, bit_scale=0.1, self_condition=False, is_pred_x0=False, pmap_axis='batch'):
+def seg_loss(rng, state, batch, ddpm_params, loss_fn, model_params, self_condition=False, is_pred_x0=False, pmap_axis='batch'):
     
     # run the forward diffusion process to generate noisy image x_t at timestep t
     x = batch['mask']
     y = batch['image']
+    c = batch['mask_counts']
     assert x.dtype in [jnp.float32, jnp.float64]
+
+    bit_scale = model_params.bit_scale
+    count_pow = model_params.count_pow
     
    # create batched timesteps: t with shape (B,)
     B, H, W, C = x.shape
@@ -842,8 +857,10 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, bit_scale=0.1, self_condit
     def compute_loss(params):
         pred = state.apply_fn({'params':params}, jnp.concatenate([x_t, y], axis=-1), batched_t)
         pred = jnp.clip(pred, -bit_scale, bit_scale)
-        loss = loss_fn(flatten(pred),flatten(target))
-        loss = jnp.mean(loss, axis= 1)
+        w = 1/c**count_pow
+        w = w/w.mean(axis=(1,2,3), keepdims=True)
+        print(w.shape, pred.shape)
+        loss = loss_fn(pred,target, w).mean(axis=(1,2,3))
         assert loss.shape == (B,)
         loss = loss #* p2_loss_weight[batched_t]
         return loss.mean()
@@ -1452,8 +1469,10 @@ def train_seg(config: ml_collections.ConfigDict,
  
   ddpm_params = utils.get_ddpm_params(config.ddpm)
   ema_decay_fn = create_ema_decay_schedule(config.ema)
+  model_params = config.model
+
   
-  train_step = functools.partial(seg_loss, ddpm_params=ddpm_params, loss_fn =loss_fn, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0, pmap_axis ='batch')
+  train_step = functools.partial(seg_loss, ddpm_params=ddpm_params, model_params=model_params, loss_fn =loss_fn, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0, pmap_axis ='batch')
   p_train_step = jax.pmap(train_step, axis_name = 'batch')
   p_apply_ema = jax.pmap(apply_ema_decay, in_axes=(0, None), axis_name = 'batch')
   p_copy_params_to_ema = jax.pmap(copy_params_to_ema, axis_name='batch')
@@ -1462,7 +1481,7 @@ def train_seg(config: ml_collections.ConfigDict,
   train_metrics = []
   hooks = []
 
-  sample_step = functools.partial(ddim_seg_sample_step, bit_scale=config.model.bit_scale, ddpm_params=ddpm_params, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0)
+  sample_step = functools.partial(seg_sample_step, bit_scale=config.model.bit_scale, ddpm_params=ddpm_params, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0)
   p_sample_step = jax.pmap(sample_step, axis_name='batch')
 
   
@@ -1528,7 +1547,7 @@ def train_seg(config: ml_collections.ConfigDict,
           for i in trange(0, config.training.num_sample, config.data.batch_size):
               batch = next(valid_iter)
               rng, sample_rng = jax.random.split(rng)
-              s = ddim_sample_loop_seg(sample_rng, state, batch, p_sample_step, config.ddpm.timesteps, config.ddpm.sampling_timesteps)
+              s = sample_loop_seg(sample_rng, state, batch, p_sample_step, config.ddpm.timesteps)
 #              print('s', s.shape)
               samples_pred.append(p_bits_to_img(s))
               samples_target.append(p_bits_to_img(batch['mask']))
@@ -1769,7 +1788,7 @@ def sample_seg(config: ml_collections.ConfigDict,
               batch = next(valid_iter)
               rng, sample_rng = jax.random.split(rng)
               if i==0:
-                s, all_x0 = ddim_sample_loop_seg(sample_rng, state, batch, p_sample_step, config.ddpm.timesteps, save_x0=True)
+                s, all_x0 = sample_loop_seg(sample_rng, state, batch, p_sample_step, config.ddpm.timesteps, save_x0=True)
                 all_samples_pred = [np.array(p_bits_to_img(u)) for u in all_x0]
                 print('all_samples_pred', len(all_samples_pred), all_samples_pred[0].shape, all_x0[0].shape)
               else:

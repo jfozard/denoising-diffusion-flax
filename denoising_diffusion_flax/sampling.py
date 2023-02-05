@@ -208,6 +208,9 @@ def ddim_seg_sample_step(state, rng, x, y, t, t_next, x0_last, bit_scale, ddpm_p
     # make sure x0 between [-1,1]
     x0 = jnp.clip(x0, -bit_scale, bit_scale)
 
+    v = x0_to_noise(x0, x, batched_t, ddpm_params)
+
+    
     x = x0 * jnp.sqrt(alpha_next) + c * v + sigma * jax.random.normal(rng, x.shape) 
     
     return x, x0

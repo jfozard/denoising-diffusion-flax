@@ -19,7 +19,7 @@ def get_config():
   # training
   config.training = training = ml_collections.ConfigDict()
   training.num_train_steps = 700000
-  training.log_every_steps = 1000
+  training.log_every_steps = 100
   training.loss_type = 'bce'
   training.half_precision = False
   training.save_and_sample_every = 1000
@@ -50,9 +50,9 @@ def get_config():
   # data
   config.data = data = ml_collections.ConfigDict()
   data.dataset ='jf_leaves'
-  data.batch_size = 64
+  data.batch_size = 8
   data.cache = False
-  data.image_size = 64
+  data.image_size = 256
   data.channels = 1*8
 
 

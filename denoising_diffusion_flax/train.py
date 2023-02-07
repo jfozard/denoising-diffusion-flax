@@ -805,7 +805,7 @@ def p_loss(rng, state, batch, ddpm_params, loss_fn, self_condition=False, is_pre
     return new_state, metrics
 
 # train step
-def seg_loss(rng, state, batch, ddpm_params, loss_fn, model_params, self_condition=False, is_pred_x0=False, pmap_axis='batch'):
+def seg_loss(rng, state, batch, max_noise_level, ddpm_params, loss_fn, model_params, self_condition=False, is_pred_x0=False, pmap_axis='batch'):
     
     # run the forward diffusion process to generate noisy image x_t at timestep t
     x = batch['mask']
@@ -820,7 +820,7 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, model_params, self_conditi
    # create batched timesteps: t with shape (B,)
     B, H, W, C = x.shape
     rng, t_rng = jax.random.split(rng)
-    batched_t = jax.random.randint(t_rng, shape=(B,), dtype = jnp.int32, minval=0, maxval= len(ddpm_params['betas']))
+    batched_t = jax.random.randint(t_rng, shape=(B,), dtype = jnp.int32, minval=0, maxval= min(max_noise_level, len(ddpm_params['betas'])))
 #    batched_t = jax.random.uniform(t_rng, shape=(B,), minval=0, maxval=0.9999)
      
   
@@ -1486,7 +1486,7 @@ def train_seg(config: ml_collections.ConfigDict,
 
   
   train_step = functools.partial(seg_loss, ddpm_params=ddpm_params, model_params=model_params, loss_fn =loss_fn, self_condition=config.ddpm.self_condition, is_pred_x0=config.ddpm.pred_x0, pmap_axis ='batch')
-  p_train_step = jax.pmap(train_step, axis_name = 'batch')
+  p_train_step = jax.pmap(train_step, axis_name = 'batch', static_broadcasted_argnums=(3,))
   p_apply_ema = jax.pmap(apply_ema_decay, in_axes=(0, None), axis_name = 'batch')
   p_copy_params_to_ema = jax.pmap(copy_params_to_ema, axis_name='batch')
   p_bits_to_img = jax.pmap(functools.partial(bits_to_img, cmap=cmap, bits=config.model.bits), axis_name = 'batch')
@@ -1506,7 +1506,7 @@ def train_seg(config: ml_collections.ConfigDict,
       rng, *train_step_rng = jax.random.split(rng, num=jax.local_device_count() + 1)
       train_step_rng = jnp.asarray(train_step_rng)
 
-      state, metrics = p_train_step(train_step_rng, state, batch)
+      state, metrics = p_train_step(train_step_rng, state, batch, len(ddpm_params['betas']) if step>1000 else 2)
 
 #      print(metrics)
       

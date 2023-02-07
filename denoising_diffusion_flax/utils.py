@@ -47,6 +47,8 @@ def get_ddpm_params(config):
     # calculate p2 reweighting
     p2_loss_weight=  (p2_loss_weight_k + alphas_bar / (1 - alphas_bar)) ** -p2_loss_weight_gamma
 
+    print('alphas', alphas)
+    print('alphas_bar', alphas_bar)
 
     return {
       'eta': config.eta,

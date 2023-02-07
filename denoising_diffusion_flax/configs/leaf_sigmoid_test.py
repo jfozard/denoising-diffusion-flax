@@ -58,8 +58,8 @@ def get_config():
 
   # model
   config.model = model = ml_collections.ConfigDict()
-  model.dim = 64
-  model.dim_mults = (1, 2, 4, 8)
+  model.dim = 128
+  model.dim_mults = (1, 1, 2, 4)
   model.simple = False
   model.bit_scale = 0.1
   model.full_attn_at_top = True

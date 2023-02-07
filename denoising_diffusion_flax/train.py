@@ -46,7 +46,7 @@ def l2_loss_w(logit, target, w):
     return ((logit - target)**2).mean(axis=-1, keepdims=True)*w
 
 def bce_loss_w(logit, target, w):
-    return optax.softmax_cross_entropy_with_integer_labels(logit, target)*w
+    return optax.softmax_cross_entropy_with_integer_labels(logit, target[...,0])*w
 
   
 def l2_loss(logit, target):
@@ -161,14 +161,13 @@ def crop_random(image, resolution):
   return tf.cast(image, tf.uint8)
                                
 
-def convert_labels(image, resolution, bits):
+def convert_labels(m, resolution, bits):
     s = resolution
-    print(image, s)
     n = 2**bits
     a = tf.image.random_crop(image, (s, s, 1))
     u, aa = tf.unique(tf.reshape(a, [-1])) #jnp.unique(a._numpy(), return_inverse=True)
     b = tf.random.shuffle(tf.tile(tf.range(m-1),[1+aa.shape[0]//n]))[:aa.shape[0]] #jnp.array(sample(jnp.range(256)/255.0, len(u)))
-    r = tf.reshape(tf.gather(b,aa), a.shape) 
+    r = tf.reshape(tf.gather(b,aa), a) 
     return tf.cast(r, tf.uint8)
 
 
@@ -190,10 +189,13 @@ def crop_random_both(image, labels, resolution, seed):
   return tf.cast(image, tf.uint8), tf.cast(labels, tf.uint8)
                                
 
-def shuffle_labels(mask):
-    u, aa = tf.unique(tf.reshape(mask, [-1])) 
-    b = tf.random.shuffle(tf.tile(tf.range(255),[1+aa.shape[0]//256]))[:aa.shape[0]] 
-    r = tf.reshape(tf.gather(b,aa), mask.shape) 
+def shuffle_labels(mask, max_label=256, dtype=tf.uint8):
+    u, aa = tf.unique(tf.reshape(mask, [-1]))
+#    print(u, aa)
+    aa_shape = tf.shape(aa)
+    rep = 1 if aa_shape[0]==None else 1+ aa_shape[0]//max_label
+    b = tf.random.shuffle(tf.tile(tf.range(max_label),[rep]))[:aa.shape[0]] 
+    r = tf.reshape(tf.gather(b,aa), tf.shape(mask)) 
     return tf.cast(r, tf.uint8)
   
 def get_dataset(rng, config):
@@ -368,7 +370,8 @@ def get_dataset_seg(rng, config, split_name='train'):
     def preprocess_fn(d, seed):
         img = d['image']
         mask = d['mask']
-        mask = convert_labels(mask, config.data.image_size, config.data.bits)
+        print('mask', mask)
+        mask = shuffle_labels(mask)
         seeds = tf.random.experimental.stateless_split(seed, num=3)
         img, mask = crop_random_both(img, mask, config.data.image_size, seeds[0])
         img = tf.image.stateless_random_flip_left_right(img, seed=seeds[1])
@@ -868,7 +871,9 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, model_params, self_conditi
         w = 1/c**count_pow
         w = w/w.mean(axis=(1,2,3), keepdims=True)
         #print(w.shape, pred.shape)
-        loss = loss_fn(pred,target, w).mean(axis=(1,2,3))
+        print(pred_sigmoid.shape, target.shape, w.shape)
+        
+        loss = loss_fn(pred_sigmoid,target, w).mean(axis=(1,2,3))
         assert loss.shape == (B,)
         loss = loss #* p2_loss_weight[batched_t]
         return loss.mean()

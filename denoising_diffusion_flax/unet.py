@@ -491,7 +491,8 @@ class EncodingUnet(nn.Module):
 class SegUnet(nn.Module):
     dim: int
     init_dim: Optional[int] = None # if None, same as dim
-    out_dim: Optional[int] = None 
+    out_dim: int = 8 
+    out_dim_sigmoid: int = 256
     dim_mults: Tuple[int, int, int, int] = (1, 2, 4, 8)
     resnet_block_groups: int = 8
     learned_variance: bool = False
@@ -575,11 +576,16 @@ class SegUnet(nn.Module):
         assert h.shape[-1] == init_dim * 2
     
         out = ResnetBlock(dim=self.dim,groups=self.resnet_block_groups, dtype=self.dtype, name = 'final.resblock_0' )(h, time_emb)
+
+        out_bit = nn.Conv(self.out_dim, kernel_size=(1,1), dtype=self.dtype, name= 'final.conv_0')(out)/10.0 
+        out_sigmoid = nn.Conv(self.out_dim_sigmoid, kernel_size=(1,1), dtype=self.dtype, name= 'final.conv_1')(out)
+
+        return out_bit, out_sigmoid
         
-        default_out_dim = C * (1 if not self.learned_variance else 2)
-        out_dim = default_out_dim if self.out_dim is None else self.out_dim
+        #default_out_dim = C * (1 if not self.learned_variance else 2)
+        #out_dim = default_out_dim if self.out_dim is None else self.out_dim
         
-        return(nn.Conv(out_dim, kernel_size=(1,1), dtype=self.dtype, name= 'final.conv_0')(out)/10.0)
+        #return(nn.Conv(out_dim, kernel_size=(1,1), dtype=self.dtype, name= 'final.conv_0')(out)/10.0)
 
 
 

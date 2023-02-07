@@ -45,6 +45,10 @@ def flatten(x):
 def l2_loss_w(logit, target, w):
     return ((logit - target)**2).mean(axis=-1, keepdims=True)*w
 
+def bce_loss_w(logit, target, w):
+    return optax.softmax_cross_entropy_with_integer_labels(logit, target)*w
+
+  
 def l2_loss(logit, target):
     return (logit - target)**2
 
@@ -364,15 +368,17 @@ def get_dataset_seg(rng, config, split_name='train'):
     def preprocess_fn(d, seed):
         img = d['image']
         mask = d['mask']
+        mask = convert_labels(mask, config.data.image_size, config.data.bits)
         seeds = tf.random.experimental.stateless_split(seed, num=3)
         img, mask = crop_random_both(img, mask, config.data.image_size, seeds[0])
         img = tf.image.stateless_random_flip_left_right(img, seed=seeds[1])
         img = tf.image.stateless_random_flip_up_down(img, seed=seeds[2])
         mask = tf.image.stateless_random_flip_left_right(mask, seed=seeds[1])
         mask = tf.image.stateless_random_flip_up_down(mask, seed=seeds[2])
+        mask_integer = mask
         img = tf.image.convert_image_dtype(img, input_dtype)
         mask = tf.image.convert_image_dtype(mask, input_dtype)
-        return({'image':img, 'mask':mask})
+        return({'image':img, 'mask':mask, 'mask_integer':mask_integer})
 
     
     # create split for current process 
@@ -414,6 +420,7 @@ def get_dataset_seg(rng, config, split_name='train'):
 
         xs = {'image': normalize_to_neg_one_to_one(xs['image'])._numpy(),
               'mask_counts': count_image(xs['mask']._numpy(), bits=config.model.bits),
+              'mask_integer': xs['mask_integer']._numpy(),
               'mask': decimal_to_bits(xs['mask']._numpy(), bits=config.model.bits)*config.model.bit_scale }
 
          
@@ -624,7 +631,7 @@ def get_loss_fn(config):
     elif config.training.loss_type == 'l2':
         loss_fn = l2_loss_w
     elif config.training.loss_type == 'bce':
-        loss_fn = bce_loss
+        loss_fn = bce_loss_w
     else:
         raise NotImplementedError(
            f'loss_type {config.training.loss_tyoe} not supported yet!')
@@ -678,9 +685,9 @@ def model_predict2(state, x, x0, y, t, ddpm_params, self_condition, is_pred_x0, 
         variables = {'params': state.params}
     
     if self_condition:
-        pred = state.apply_fn(variables, jnp.concatenate([x, x0, y],axis=-1), t)
+        pred, _ = state.apply_fn(variables, jnp.concatenate([x, x0, y],axis=-1), t)
     else:
-        pred = state.apply_fn(variables, jnp.concatenate([x, y],axis=-1), t)
+        pred, _ = state.apply_fn(variables, jnp.concatenate([x, y],axis=-1), t)
     
     return pred, None
 
@@ -801,6 +808,7 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, model_params, self_conditi
     x = batch['mask']
     y = batch['image']
     c = batch['mask_counts']
+    m = batch['mask_integer']
     assert x.dtype in [jnp.float32, jnp.float64]
 
     bit_scale = model_params.bit_scale
@@ -817,7 +825,7 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, model_params, self_conditi
     rng, noise_rng = jax.random.split(rng)
     noise = jax.random.normal(noise_rng, x.shape)
     # if is_pred_x0 == True, the target for loss calculation is x, else noise
-    target = x if is_pred_x0 else noise
+    target = m #x if is_pred_x0 else noise
  
     #noise_level = alpha_cosine_log_snr(batched_t)
 
@@ -855,11 +863,11 @@ def seg_loss(rng, state, batch, ddpm_params, loss_fn, model_params, self_conditi
 #    p2_loss_weight = ddpm_params['p2_loss_weight']
 
     def compute_loss(params):
-        pred = state.apply_fn({'params':params}, jnp.concatenate([x_t, y], axis=-1), batched_t)
-        pred = jnp.clip(pred, -bit_scale, bit_scale)
+        _, pred_sigmoid = state.apply_fn({'params':params}, jnp.concatenate([x_t, y], axis=-1), batched_t)
+        #pred = jnp.clip(pred, -bit_scale, bit_scale)
         w = 1/c**count_pow
         w = w/w.mean(axis=(1,2,3), keepdims=True)
-        print(w.shape, pred.shape)
+        #print(w.shape, pred.shape)
         loss = loss_fn(pred,target, w).mean(axis=(1,2,3))
         assert loss.shape == (B,)
         loss = loss #* p2_loss_weight[batched_t]

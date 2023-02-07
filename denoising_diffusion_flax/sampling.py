@@ -50,9 +50,9 @@ def model_predict(state, x, x0, t, ddpm_params, self_condition, is_pred_x0, use_
         variables = {'params': state.params}
     
     if self_condition:
-        pred = state.apply_fn(variables, jnp.concatenate([x, x0],axis=-1), t)
+        pred, _ = state.apply_fn(variables, jnp.concatenate([x, x0],axis=-1), t)
     else:
-        pred = state.apply_fn(variables, x, t)
+        pred, _ = state.apply_fn(variables, x, t)
 
     if is_pred_x0: # if the objective is is_pred_x0, pred == x0_pred
         x0_pred = pred
@@ -72,9 +72,9 @@ def seg_model_predict(state, x, x0, y, t, ddpm_params, self_condition, is_pred_x
         variables = {'params': state.params}
     
     if self_condition:
-        pred = state.apply_fn(variables, jnp.concatenate([x, x0, y],axis=-1), t)
+        pred, _ = state.apply_fn(variables, jnp.concatenate([x, x0, y],axis=-1), t)
     else:
-        pred = state.apply_fn(variables, jnp.concatenate([x, y],axis=-1), t)
+        pred, _ = state.apply_fn(variables, jnp.concatenate([x, y],axis=-1), t)
 
     if is_pred_x0: # if the objective is is_pred_x0, pred == x0_pred
         x0_pred = pred

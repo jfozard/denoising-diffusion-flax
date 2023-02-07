@@ -45,6 +45,10 @@ def flatten(x):
 def l2_loss_w(logit, target, w):
     return ((logit - target)**2).mean(axis=-1, keepdims=True)*w
 
+def bce_loss_w(logit, target, w):
+    return optax.softmax_cross_entropy_with_integer_labels(logit, target[...,0])*w
+
+  
 def l2_loss(logit, target):
     return (logit - target)**2
 
@@ -186,10 +190,13 @@ def crop_random_both(image, labels, resolution, seed):
   return tf.cast(image, tf.uint8), tf.cast(labels, tf.uint8)
                                
 
-def shuffle_labels(mask):
-    u, aa = tf.unique(tf.reshape(mask, [-1])) 
-    b = tf.random.shuffle(tf.tile(tf.range(255),[1+aa.shape[0]//256]))[:aa.shape[0]] 
-    r = tf.reshape(tf.gather(b,aa), mask.shape) 
+def shuffle_labels(mask, max_label=256, dtype=tf.uint8):
+    u, aa = tf.unique(tf.reshape(mask, [-1]))
+#    print(u, aa)
+    aa_shape = tf.shape(aa)
+    rep = 1 if aa_shape[0]==None else 1+ aa_shape[0]//max_label
+    b = tf.random.shuffle(tf.tile(tf.range(max_label),[rep]))[:aa.shape[0]] 
+    r = tf.reshape(tf.gather(b,aa), tf.shape(mask)) 
     return tf.cast(r, tf.uint8)
   
 def get_dataset(rng, config):
@@ -364,6 +371,7 @@ def get_dataset_seg(rng, config, split_name='train'):
     def preprocess_fn(d, seed):
         img = d['image']
         mask = d['mask']
+        mask = shuffle_labels(mask)
         seeds = tf.random.experimental.stateless_split(seed, num=3)
         img, mask = crop_random_both(img, mask, config.data.image_size, seeds[0])
         img = tf.image.stateless_random_flip_left_right(img, seed=seeds[1])
@@ -624,7 +632,7 @@ def get_loss_fn(config):
     elif config.training.loss_type == 'l2':
         loss_fn = l2_loss_w
     elif config.training.loss_type == 'bce':
-        loss_fn = bce_loss
+        loss_fn = bce_loss_w
     else:
         raise NotImplementedError(
            f'loss_type {config.training.loss_tyoe} not supported yet!')
